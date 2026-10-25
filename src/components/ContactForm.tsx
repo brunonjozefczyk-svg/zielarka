@@ -140,7 +140,7 @@ export function ContactForm() {
         Wyślij zgłoszenie
       </Button>
       <p className="text-sm leading-relaxed text-muted">
-        Wiadomość idzie na skrzynkę Sabiny. To nie jest porada medyczna i nie zastępuje wizyty u lekarza. Możesz też napisać od razu na{" "}
+        Wiadomość idzie na skrzynkę Sabiny przez zewnętrzny formularz. Nie powstaje z niej kartoteka medyczna. To nie jest porada lekarska. Możesz też napisać od razu na{" "}
         <a href="mailto:kontakt@zielarka.pl" className="text-forest underline">
           kontakt@zielarka.pl
         </a>

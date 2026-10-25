@@ -1,11 +1,12 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { EditableImage } from "@/components/EditableImage";
 import { EditableText } from "@/components/EditableText";
+import { JsonLd } from "@/components/JsonLd";
 import { PageIntro } from "@/components/PageIntro";
 import { SiteShell } from "@/components/SiteShell";
 import { Button } from "@/components/ui/button";
 import { site } from "@/lib/content";
-import { metaFor } from "@/lib/seo";
+import { breadcrumbJsonLd, metaFor } from "@/lib/seo";
 
 export const Route = createFileRoute("/o-mnie")({
   head: () =>
@@ -21,6 +22,12 @@ export const Route = createFileRoute("/o-mnie")({
 function AboutPage() {
   return (
     <SiteShell>
+      <JsonLd
+        data={breadcrumbJsonLd([
+          { name: "Start", url: site.url },
+          { name: "O mnie", url: `${site.url}/o-mnie` },
+        ])}
+      />
       <PageIntro
         kicker="O mnie"
         title="Sabina Józefczyk"

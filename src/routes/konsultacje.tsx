@@ -1,10 +1,12 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { EditableImage } from "@/components/EditableImage";
 import { EditableText } from "@/components/EditableText";
+import { JsonLd } from "@/components/JsonLd";
 import { PageIntro } from "@/components/PageIntro";
 import { SiteShell } from "@/components/SiteShell";
 import { Button } from "@/components/ui/button";
-import { metaFor } from "@/lib/seo";
+import { site } from "@/lib/content";
+import { breadcrumbJsonLd, metaFor } from "@/lib/seo";
 
 export const Route = createFileRoute("/konsultacje")({
   head: () =>
@@ -39,6 +41,12 @@ const steps = [
 function ConsultPage() {
   return (
     <SiteShell>
+      <JsonLd
+        data={breadcrumbJsonLd([
+          { name: "Start", url: site.url },
+          { name: "Konsultacje", url: `${site.url}/konsultacje` },
+        ])}
+      />
       <PageIntro
         kicker="Konsultacje"
         title="Ziołowa opieka 1:1"

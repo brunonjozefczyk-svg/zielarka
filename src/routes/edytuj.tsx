@@ -9,6 +9,7 @@ export const Route = createFileRoute("/edytuj")({
   head: () => ({
     meta: [
       { title: "Edycja — Zielarka.pl" },
+      { name: "description", content: "Prywatne wejście do edycji strony." },
       { name: "robots", content: "noindex, nofollow" },
     ],
   }),

@@ -1,9 +1,10 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { ContactForm } from "@/components/ContactForm";
+import { JsonLd } from "@/components/JsonLd";
 import { PageIntro } from "@/components/PageIntro";
 import { SiteShell } from "@/components/SiteShell";
 import { site } from "@/lib/content";
-import { metaFor } from "@/lib/seo";
+import { breadcrumbJsonLd, metaFor } from "@/lib/seo";
 
 export const Route = createFileRoute("/kontakt")({
   head: () =>
@@ -19,6 +20,12 @@ export const Route = createFileRoute("/kontakt")({
 function ContactPage() {
   return (
     <SiteShell>
+      <JsonLd
+        data={breadcrumbJsonLd([
+          { name: "Start", url: site.url },
+          { name: "Kontakt", url: `${site.url}/kontakt` },
+        ])}
+      />
       <PageIntro
         kicker="Kontakt"
         title="Napisz"

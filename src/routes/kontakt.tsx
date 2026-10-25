@@ -3,8 +3,18 @@ import { ContactForm } from "@/components/ContactForm";
 import { PageIntro } from "@/components/PageIntro";
 import { SiteShell } from "@/components/SiteShell";
 import { site } from "@/lib/content";
+import { metaFor } from "@/lib/seo";
 
-export const Route = createFileRoute("/kontakt")({ component: ContactPage });
+export const Route = createFileRoute("/kontakt")({
+  head: () =>
+    metaFor({
+      title: "Kontakt — umów konsultację | Zielarka.pl",
+      description:
+        "Napisz do Sabiny Józefczyk w sprawie konsultacji zielarskiej, warsztatu, spaceru albo Klubu Zielarskiego.",
+      path: "/kontakt",
+    }),
+  component: ContactPage,
+});
 
 function ContactPage() {
   return (

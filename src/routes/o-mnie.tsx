@@ -5,8 +5,18 @@ import { PageIntro } from "@/components/PageIntro";
 import { SiteShell } from "@/components/SiteShell";
 import { Button } from "@/components/ui/button";
 import { site } from "@/lib/content";
+import { metaFor } from "@/lib/seo";
 
-export const Route = createFileRoute("/o-mnie")({ component: AboutPage });
+export const Route = createFileRoute("/o-mnie")({
+  head: () =>
+    metaFor({
+      title: "Sabina Józefczyk — zielarka-fitoterapeutka | Zielarka.pl",
+      description:
+        "Sabina Józefczyk prowadzi Zielarka.pl od 2024 roku. Kurs zielarz-fitoterapeuta, studia podyplomowe i kurs fitoterapii. Konsultacje, warsztaty i spacery.",
+      path: "/o-mnie",
+    }),
+  component: AboutPage,
+});
 
 function AboutPage() {
   return (

@@ -12,6 +12,7 @@ export function EditableImage({
   width,
   height,
   loading,
+  fetchPriority,
   scrim,
   control = "bottom",
 }: {
@@ -23,6 +24,7 @@ export function EditableImage({
   width?: number;
   height?: number;
   loading?: "lazy" | "eager";
+  fetchPriority?: "high" | "low" | "auto";
   scrim?: boolean;
   control?: "bottom" | "top";
 }) {
@@ -56,7 +58,9 @@ export function EditableImage({
         alt={alt}
         width={width}
         height={height}
-        loading={loading}
+        loading={loading ?? "lazy"}
+        fetchPriority={fetchPriority}
+        decoding="async"
         className={className}
       />
       {scrim ? (

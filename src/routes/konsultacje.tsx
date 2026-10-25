@@ -4,8 +4,18 @@ import { EditableText } from "@/components/EditableText";
 import { PageIntro } from "@/components/PageIntro";
 import { SiteShell } from "@/components/SiteShell";
 import { Button } from "@/components/ui/button";
+import { metaFor } from "@/lib/seo";
 
-export const Route = createFileRoute("/konsultacje")({ component: ConsultPage });
+export const Route = createFileRoute("/konsultacje")({
+  head: () =>
+    metaFor({
+      title: "Konsultacje zielarskie 1:1 | Zielarka.pl",
+      description:
+        "Indywidualna rozmowa z Sabiną Józefczyk o tym, co dzieje się w ciele i jak zioła mogą Cię wesprzeć. Konsultacja zielarska nie zastępuje wizyty u lekarza.",
+      path: "/konsultacje",
+    }),
+  component: ConsultPage,
+});
 
 const steps = [
   {

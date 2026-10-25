@@ -8,8 +8,19 @@ import { Button } from "@/components/ui/button";
 import { offers, site } from "@/lib/content";
 import { useMergedHerbs } from "@/lib/herb-editor";
 import { useEditMode } from "@/lib/site-editor";
+import { homeJsonLd, metaFor } from "@/lib/seo";
+import { JsonLd } from "@/components/JsonLd";
 
-export const Route = createFileRoute("/")({ component: Home });
+export const Route = createFileRoute("/")({
+  head: () =>
+    metaFor({
+      title: "Zielarka.pl — konsultacje zielarskie, warsztaty i Klub Zielarski",
+      description:
+        "Sabina Józefczyk, zielarka-fitoterapeutka z Krakowa. Konsultacje 1:1, warsztaty, spacery zielarskie i internetowy Klub Zielarski.",
+      path: "/",
+    }),
+  component: Home,
+});
 
 function Home() {
   const herbs = useMergedHerbs();
@@ -17,6 +28,7 @@ function Home() {
 
   return (
     <SiteShell>
+      <JsonLd data={homeJsonLd()} />
       <section className="relative min-h-[88vh] overflow-hidden">
         <EditableImage
           id="img.home.hero"
@@ -24,6 +36,10 @@ function Home() {
           alt="Dzika łąka zielarska o świcie"
           wrapClassName="absolute inset-0 z-0"
           className="size-full object-cover"
+          loading="eager"
+          fetchPriority="high"
+          width={1600}
+          height={900}
           scrim
           control="top"
         />

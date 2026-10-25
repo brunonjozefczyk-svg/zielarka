@@ -1,8 +1,42 @@
 import { herbs, type Herb } from "./herbs";
 import { site } from "./content";
 
-export function pageTitle(title: string) {
-  return `${title} | ${site.name}`;
+export function metaFor(opts: { title: string; description: string; path: string }) {
+  const url = opts.path === "/" ? site.url : `${site.url}${opts.path}`;
+  return {
+    meta: [
+      { title: opts.title },
+      { name: "description", content: opts.description },
+      { name: "author", content: site.person },
+      { property: "og:title", content: opts.title },
+      { property: "og:description", content: opts.description },
+      { property: "og:url", content: url },
+      { property: "og:image", content: `${site.url}/og.jpg` },
+      { property: "og:type", content: "website" },
+      { property: "og:locale", content: "pl_PL" },
+      { name: "twitter:card", content: "summary_large_image" },
+    ],
+    links: [{ rel: "canonical", href: url }],
+  };
+}
+
+export function homeJsonLd() {
+  return {
+    "@context": "https://schema.org",
+    "@type": "ProfessionalService",
+    name: site.name,
+    url: site.url,
+    image: `${site.url}/og.jpg`,
+    description:
+      "Sabina Józefczyk, zielarka-fitoterapeutka. Konsultacje, warsztaty, spacery i Klub Zielarski. Kraków i okolice.",
+    areaServed: {
+      "@type": "AdministrativeArea",
+      name: "Kraków i województwo małopolskie",
+    },
+    founder: personJsonLd(),
+    sameAs: [site.facebook, site.instagram, site.tiktok],
+    inLanguage: "pl-PL",
+  };
 }
 
 export function personJsonLd() {

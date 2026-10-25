@@ -5,8 +5,18 @@ import { PageIntro } from "@/components/PageIntro";
 import { SiteShell } from "@/components/SiteShell";
 import { Button } from "@/components/ui/button";
 import { site } from "@/lib/content";
+import { metaFor } from "@/lib/seo";
 
-export const Route = createFileRoute("/klub")({ component: ClubPage });
+export const Route = createFileRoute("/klub")({
+  head: () =>
+    metaFor({
+      title: "Klub Zielarski — wiedza o ziołach w telefonie | Zielarka.pl",
+      description:
+        "Internetowy Klub Zielarski Sabiny Józefczyk: ziołowa wiedza, spacery i przepisy na preparaty i potrawy, z jej wsparciem.",
+      path: "/klub",
+    }),
+  component: ClubPage,
+});
 
 function ClubPage() {
   return (

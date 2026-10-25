@@ -4,8 +4,18 @@ import { EditableText } from "@/components/EditableText";
 import { PageIntro } from "@/components/PageIntro";
 import { SiteShell } from "@/components/SiteShell";
 import { Button } from "@/components/ui/button";
+import { metaFor } from "@/lib/seo";
 
-export const Route = createFileRoute("/warsztaty")({ component: WorkshopsPage });
+export const Route = createFileRoute("/warsztaty")({
+  head: () =>
+    metaFor({
+      title: "Warsztaty i spacery zielarskie | Zielarka.pl",
+      description:
+        "Nauka zielarstwa przez praktykę: warsztaty przy stole i spacery w terenie. Napisz, a Sabina powie, gdzie są najbliższe wydarzenia.",
+      path: "/warsztaty",
+    }),
+  component: WorkshopsPage,
+});
 
 const items = [
   {

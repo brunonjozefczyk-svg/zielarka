@@ -30,15 +30,17 @@ export function passwordOk(given: string) {
   return timingSafeEqual(a, b);
 }
 
+const BLOB_API = "11";
+
 async function blobPut(pathname: string, body: BodyInit, contentType: string) {
   const key = token();
   if (!key) throw new Error("Brak magazynu zdjęć.");
-  const url = `https://vercel.com/api/blob/?pathname=${encodeURIComponent(pathname)}`;
+  const url = `https://vercel.com/api/blob/?${new URLSearchParams({ pathname })}`;
   const res = await fetch(url, {
     method: "PUT",
     headers: {
       authorization: `Bearer ${key}`,
-      "x-api-version": "7",
+      "x-api-version": BLOB_API,
       "x-content-type": contentType,
       "x-add-random-suffix": "0",
       "x-allow-overwrite": "1",
@@ -55,9 +57,9 @@ async function blobPut(pathname: string, body: BodyInit, contentType: string) {
 async function blobHead(pathname: string) {
   const key = token();
   if (!key) throw new Error("Brak magazynu treści.");
-  const url = `https://vercel.com/api/blob/head?pathname=${encodeURIComponent(pathname)}`;
+  const url = `https://vercel.com/api/blob/?${new URLSearchParams({ url: pathname })}`;
   const res = await fetch(url, {
-    headers: { authorization: `Bearer ${key}`, "x-api-version": "7" },
+    headers: { authorization: `Bearer ${key}`, "x-api-version": BLOB_API },
   });
   if (res.status === 404) return null;
   if (!res.ok) throw new Error(`Odczyt nie powiódł się (${res.status}).`);

@@ -1,5 +1,6 @@
 import { createServerFn } from "@tanstack/react-start";
 import { herbOutageAction } from "./cms-guard";
+import { SERVER_PAYLOAD_LIMIT } from "./backup-wire";
 import type { ManagedEntry } from "./entries";
 import type { HerbCopy } from "./herb-editor";
 import type { TextStyle, ThemeSettings } from "./theme";
@@ -256,10 +257,32 @@ export const downloadBackupFn = createServerFn({ method: "POST" })
   .validator((data: { password: string }) => ({ password: data.password ?? "" }))
   .handler(async ({ data }) => {
     const result = await gate(data.password);
-    if (!result.ok) return { ok: false as const, filename: "", body: "", message: result.message };
+    if (!result.ok) {
+      return { ok: false as const, filename: "", sealedManifest: "", parts: [], message: result.message };
+    }
     const { downloadBackup } = await import("./site-store.server");
     const file = await downloadBackup();
-    return { ok: true as const, filename: file.filename, body: file.body, message: "" };
+    return {
+      ok: true as const,
+      filename: file.filename,
+      sealedManifest: file.sealedManifest,
+      parts: file.parts,
+      message: "",
+    };
+  });
+
+export const downloadBackupPartFn = createServerFn({ method: "POST" })
+  .validator((data: { password?: string; sha256?: string; slice?: number }) => ({
+    password: data.password ?? "",
+    sha256: data.sha256 ?? "",
+    slice: Number(data.slice),
+  }))
+  .handler(async ({ data }) => {
+    const result = await gate(data.password);
+    if (!result.ok) return { ok: false as const, sha256: "", slice: 0, sealed: "", message: result.message };
+    const { downloadBackupPart } = await import("./site-store.server");
+    const part = await downloadBackupPart(data.sha256, data.slice);
+    return { ok: true as const, sha256: part.sha256, slice: part.slice, sealed: part.sealed, message: "" };
   });
 
 export const restoreBackupFn = createServerFn({ method: "POST" })
@@ -280,7 +303,9 @@ export const restoreBackupFn = createServerFn({ method: "POST" })
 export const restoreUploadFn = createServerFn({ method: "POST" })
   .validator((data: { password?: string; body?: string; revision?: number; phrase?: string }) => {
     const body = data.body ?? "";
-    if (body.length > 4_000_000) throw new Error("Plik kopii jest za duży na jedno przesłanie.");
+    if (body.length > SERVER_PAYLOAD_LIMIT) {
+      throw new Error("Ten plik jest za duży na jedno przesłanie. Kopia dzielona idzie częściami. Nic nie zostało podmienione.");
+    }
     return {
       password: data.password ?? "",
       body,
@@ -293,6 +318,53 @@ export const restoreUploadFn = createServerFn({ method: "POST" })
     if (!result.ok) return { ok: false as const, revision: data.revision, message: result.message };
     const { restoreUploadedBackup } = await import("./site-store.server");
     const restored = await restoreUploadedBackup(data.body, data.revision, data.phrase);
+    return { ok: true as const, revision: restored.revision, message: restored.message };
+  });
+
+export const restoreBeginFn = createServerFn({ method: "POST" })
+  .validator((data: { password?: string; manifest?: string }) => {
+    const manifest = data.manifest ?? "";
+    if (manifest.length > SERVER_PAYLOAD_LIMIT) {
+      throw new Error("Manifest kopii jest zbyt duży. Nic nie zostało podmienione.");
+    }
+    return { password: data.password ?? "", manifest };
+  })
+  .handler(async ({ data }) => {
+    const result = await gate(data.password);
+    if (!result.ok) return { ok: false as const, session: "", parts: 0, message: result.message };
+    const { beginRestoreUpload } = await import("./site-store.server");
+    const started = await beginRestoreUpload(data.manifest);
+    return { ok: true as const, session: started.session, parts: started.parts, message: "" };
+  });
+
+export const restorePartFn = createServerFn({ method: "POST" })
+  .validator((data: { password?: string; session?: string; sealed?: string }) => {
+    const sealed = data.sealed ?? "";
+    if (sealed.length > SERVER_PAYLOAD_LIMIT) {
+      throw new Error("Część kopii jest za duża na jedno przesłanie. Nic nie zostało podmienione.");
+    }
+    return { password: data.password ?? "", session: data.session ?? "", sealed };
+  })
+  .handler(async ({ data }) => {
+    const result = await gate(data.password);
+    if (!result.ok) return { ok: false as const, message: result.message };
+    const { saveRestorePart } = await import("./site-store.server");
+    await saveRestorePart(data.session, data.sealed);
+    return { ok: true as const, message: "" };
+  });
+
+export const restoreFinishFn = createServerFn({ method: "POST" })
+  .validator((data: { password?: string; session?: string; revision?: number; phrase?: string }) => ({
+    password: data.password ?? "",
+    session: data.session ?? "",
+    revision: Number(data.revision),
+    phrase: data.phrase ?? "",
+  }))
+  .handler(async ({ data }) => {
+    const result = await gate(data.password);
+    if (!result.ok) return { ok: false as const, revision: data.revision, message: result.message };
+    const { finishRestoreUpload } = await import("./site-store.server");
+    const restored = await finishRestoreUpload(data.session, data.revision, data.phrase);
     return { ok: true as const, revision: restored.revision, message: restored.message };
   });
 

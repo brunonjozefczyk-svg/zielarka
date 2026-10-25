@@ -4,8 +4,9 @@
  * Automatyczna kopia poza Vercel Blob nie jest tu włączona.
  */
 import { createHash } from "node:crypto";
-import { canonicalEdits, restoreAllowed } from "./cms-guard";
+import { canonicalEdits, restoreAllowed, urlsToRetain, type KeptBlob } from "./cms-guard";
 import { payloadSha } from "./draft-seal.server";
+import { RAW_SLICE, SERVER_PAYLOAD_LIMIT } from "./backup-wire";
 
 export type ImageUse = "public" | "draft";
 
@@ -163,7 +164,7 @@ export function verifyPayload(raw: unknown): { ok: true; payload: BackupPayload 
 export function asLegacy(raw: unknown): { doc: BackupDoc; sha: string } | null {
   if (!raw || typeof raw !== "object") return null;
   const row = raw as Record<string, unknown>;
-  if (row.format === 2) return null;
+  if (row.format === 2 || row.format === 3) return null;
   if (row.doc && typeof row.doc === "object" && typeof row.sha === "string") {
     const doc = row.doc as BackupDoc;
     if (payloadSha(canonicalEdits(doc)) !== row.sha) return null;
@@ -315,3 +316,210 @@ export function dropProtected(urls: string[], protect: string[]) {
   const ban = new Set(protect.filter(Boolean));
   return urls.filter((url) => !ban.has(url));
 }
+
+export type ManifestFile = {
+  ref: string;
+  use: ImageUse;
+  mime: BackupFile["mime"];
+  sha256: string;
+  slices: number;
+};
+
+export type BackupManifest = {
+  format: 3;
+  kind: string;
+  at: string;
+  revision: number;
+  docSha: string;
+  textSha: string;
+  doc: BackupDoc;
+  files: ManifestFile[];
+};
+
+export { RAW_SLICE, SERVER_PAYLOAD_LIMIT };
+
+export function sliceBytes(bytes: Buffer, size = RAW_SLICE): Buffer[] {
+  if (!bytes.length) return [];
+  const out: Buffer[] = [];
+  for (let offset = 0; offset < bytes.length; offset += size) out.push(bytes.subarray(offset, offset + size));
+  return out;
+}
+
+export function sliceEnvelope(sha256: string, slice: number, slices: number, bytes: Buffer) {
+  return JSON.stringify({ sha256, slice, slices, base64: bytes.toString("base64") });
+}
+
+export function toManifest(payload: BackupPayload): BackupManifest {
+  return {
+    format: 3,
+    kind: payload.kind,
+    at: payload.at,
+    revision: payload.revision,
+    docSha: payload.docSha,
+    textSha: payload.textSha,
+    doc: payload.doc,
+    files: payload.files.map((file) => ({
+      ref: file.ref,
+      use: file.use,
+      mime: file.mime,
+      sha256: file.sha256,
+      slices: sliceBytes(Buffer.from(file.base64, "base64")).length,
+    })),
+  };
+}
+
+export function joinSliceText(parts: { slice: number; slices: number; base64: string }[]): string {
+  if (!parts.length) return "";
+  const seen = new Set<number>();
+  for (const part of parts) {
+    if (seen.has(part.slice)) {
+      throw new Error("W kopii jest powtórzona część zdjęcia. Nic nie zostało podmienione.");
+    }
+    seen.add(part.slice);
+  }
+  const sorted = [...parts].sort((a, b) => a.slice - b.slice);
+  const slices = sorted[0]?.slices ?? 0;
+  if (sorted.length !== slices || sorted.some((part, index) => part.slice !== index || part.slices !== slices)) {
+    throw new Error("W kopii brakuje części zdjęcia. Nic nie zostało podmienione.");
+  }
+  return sorted.map((part) => part.base64).join("");
+}
+
+export function attachManifestParts(
+  manifest: BackupManifest,
+  bins: { sha256: string; base64: string }[],
+): { ok: true; payload: BackupPayload } | { ok: false; error: string } {
+  if (manifest.format !== 3 || !manifest.doc || !Array.isArray(manifest.files)) {
+    return { ok: false, error: "Kopia jest uszkodzona." };
+  }
+  const files: BackupFile[] = [];
+  for (const file of manifest.files) {
+    const bin = bins.find((item) => item.sha256 === file.sha256);
+    if (!bin) return { ok: false, error: "W kopii brakuje pliku zdjęcia. Nic nie zostało podmienione." };
+    const bytes = Buffer.from(bin.base64, "base64");
+    if (sha256Bytes(bytes) !== file.sha256 || sniffImage(bytes) !== file.mime) {
+      return { ok: false, error: "Plik zdjęcia w kopii jest uszkodzony. Nic nie zostało podmienione." };
+    }
+    files.push({ ref: file.ref, use: file.use, mime: file.mime, sha256: file.sha256, base64: bin.base64 });
+  }
+  const payload: BackupPayload = {
+    format: 2,
+    kind: manifest.kind,
+    at: manifest.at,
+    revision: manifest.revision,
+    docSha: manifest.docSha,
+    textSha: manifest.textSha,
+    doc: manifest.doc,
+    files,
+  };
+  return verifyPayload(payload);
+}
+
+/** Szkic idzie do prywatnego magazynu. Opublikowane zdjęcie może dostać publiczny adres. */
+export function imageGoesToPrivateStore(use: ImageUse) {
+  return use === "draft";
+}
+
+/**
+ * Kopia jest dobra dopiero, gdy manifest i części składają się w ten sam dokument i te same bajty.
+ * Sam manifest formatu 3 tu nie przechodzi.
+ */
+export function confirmBackupRoundtrip(
+  source: BackupPayload,
+  opened: BackupManifest,
+  bins: { sha256: string; base64: string }[],
+): { ok: true; payload: BackupPayload } | { ok: false; error: string } {
+  const seen = new Set<string>();
+  for (const file of opened.files || []) {
+    const key = `${file.use}\0${file.ref}`;
+    if (seen.has(key)) return { ok: false, error: "W kopii jest powtórzone zdjęcie. Nic nie zostało podmienione." };
+    seen.add(key);
+  }
+  const attached = attachManifestParts(opened, bins);
+  if (!attached.ok) return attached;
+  if (attached.payload.docSha !== source.docSha || attached.payload.textSha !== source.textSha) {
+    return { ok: false, error: "Suma kontrolna kopii nie pasuje. Nic nie zostało podmienione." };
+  }
+  if (textCanon(attached.payload.doc) !== textCanon(source.doc)) {
+    return { ok: false, error: "Treść kopii nie da się odtworzyć. Nic nie zostało podmienione." };
+  }
+  for (const file of source.files) {
+    const back = attached.payload.files.find((item) => item.ref === file.ref && item.use === file.use);
+    if (!back || back.sha256 !== file.sha256 || back.base64 !== file.base64 || back.mime !== file.mime) {
+      return { ok: false, error: "Plik zdjęcia w kopii jest uszkodzony. Nic nie zostało podmienione." };
+    }
+    const sourceEntry = source.doc.entries?.find((entry) => entry.image === file.ref);
+    const backEntry = attached.payload.doc.entries?.find((entry) => entry.image === file.ref);
+    if ((sourceEntry?.status ?? "") !== (backEntry?.status ?? "")) {
+      return { ok: false, error: "Status szkicu albo publikacji nie da się odtworzyć. Nic nie zostało podmienione." };
+    }
+  }
+  return attached;
+}
+
+export type BackupRetentionManifest = {
+  pathname: string;
+  url: string;
+  uploadedAt: number;
+  shas: string[];
+};
+
+export type BackupRetentionPart = {
+  url: string;
+  downloadUrl?: string;
+  sha256: string;
+};
+
+/**
+ * Manifest chroniony przy przywracaniu zostaje razem ze swoimi częściami,
+ * nawet gdy retencja już by go skasowała. Brak chronionej ścieżki na liście zatrzymuje kasowanie.
+ */
+export function planBackupRetention(input: {
+  manifests: BackupRetentionManifest[];
+  parts: BackupRetentionPart[];
+  protectPathnames: string[];
+}): { deleteUrls: string[] } {
+  const protect = [...new Set(input.protectPathnames.filter(Boolean))];
+  const byPath = new Map(input.manifests.map((item) => [item.pathname, item]));
+  for (const path of protect) {
+    if (!byPath.has(path)) {
+      throw new Error("Chroniona kopia nie jest na kompletnej liście. Nic nie zostało skasowane.");
+    }
+  }
+  const kept: KeptBlob[] = input.manifests.map((item) => ({
+    pathname: item.pathname,
+    url: item.url,
+    uploadedAt: item.uploadedAt,
+    revision: item.uploadedAt,
+  }));
+  const removeUrls = urlsToRetain(kept);
+  const removeSet = new Set(removeUrls);
+  const keepPaths = new Set<string>();
+  for (const item of input.manifests) {
+    if (!item.url || !removeSet.has(item.url)) keepPaths.add(item.pathname);
+  }
+  for (const path of protect) keepPaths.add(path);
+  const referenced = new Set<string>();
+  for (const path of keepPaths) {
+    const item = byPath.get(path);
+    if (!item) continue;
+    for (const sha of item.shas) {
+      if (!/^[a-f0-9]{64}$/.test(sha)) {
+        throw new Error("Nie da się odczytać zachowanej kopii. Przycinanie zostało zatrzymane.");
+      }
+      referenced.add(sha);
+    }
+  }
+  const partDeletes: string[] = [];
+  for (const part of input.parts) {
+    if (!/^[a-f0-9]{64}$/.test(part.sha256) || referenced.has(part.sha256)) continue;
+    if (part.url) partDeletes.push(part.url);
+    if (part.downloadUrl && part.downloadUrl !== part.url) partDeletes.push(part.downloadUrl);
+  }
+  const protectUrls = protect.flatMap((path) => {
+    const item = byPath.get(path);
+    return item?.url ? [item.url] : [];
+  });
+  return { deleteUrls: dropProtected([...removeUrls, ...partDeletes], protectUrls) };
+}
+

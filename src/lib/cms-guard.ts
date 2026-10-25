@@ -77,6 +77,62 @@ export function trustPublicPointer(pointerRevision: number, nextJournalExists: b
   return Number.isInteger(pointerRevision) && pointerRevision >= 0 && nextJournalExists === false;
 }
 
+export const STORE_OUTAGE = "Magazyn treści jest chwilowo niedostępny. Zapis został zatrzymany. Nic nie zostało cofnięte.";
+
+/**
+ * Uszkodzony pojedynczy plik można pominąć. Chwilowa awaria, brak klucza i błąd sieci
+ * zatrzymują odczyt — nie wolno wtedy przyjąć starszej wersji za aktualną.
+ */
+export function readFailureAction(error: unknown): "try-older" | "stop" {
+  if (!(error instanceof Error)) return "stop";
+  if (/chwilowo niedostępny|Zapis został zatrzymany|Brak klucza|CMS_SEAL_KEY|CMS_SEAL_KEYS|dwa różne klucze/i.test(error.message)) {
+    return "stop";
+  }
+  if (error instanceof SyntaxError) return "try-older";
+  if (/Odczyt treści nie powiódł się \(404\)/.test(error.message)) return "try-older";
+  if (/Odczyt (treści )?nie powiódł się \(\d+\)/.test(error.message)) return "stop";
+  if (/Kopia jest uszkodzona|Suma kontrolna|nie zgadza się/i.test(error.message)) return "try-older";
+  if (/Nie da się odczytać starej kopii/i.test(error.message)) return "stop";
+  return "stop";
+}
+
+/** 503 i sieć stają się czytelnym komunikatem. Brak klucza zostaje własnym komunikatem. Uszkodzony plik nie jest awarią. */
+export function throwIfUncertain(error: unknown): void {
+  if (readFailureAction(error) !== "stop") return;
+  if (
+    error instanceof Error &&
+    /Brak klucza|CMS_SEAL|Nie da się odczytać starej kopii|chwilowo niedostępny|Zapis został zatrzymany|Nic nie zostało skasowane|Brak magazynu/.test(
+      error.message,
+    )
+  ) {
+    throw error;
+  }
+  throw new Error(STORE_OUTAGE);
+}
+
+export function chooseFreshRead<T>(
+  attempts: ({ ok: true; value: T } | { ok: false; error: unknown })[],
+): { action: "use"; value: T } | { action: "stop" } | { action: "damaged" } | { action: "empty" } {
+  let corrupt = false;
+  for (const attempt of attempts) {
+    if (attempt.ok) return { action: "use", value: attempt.value };
+    if (readFailureAction(attempt.error) === "stop") return { action: "stop" };
+    corrupt = true;
+  }
+  if (!attempts.length) return { action: "empty" };
+  return corrupt ? { action: "damaged" } : { action: "empty" };
+}
+
+/** Zwykły zapis rusza tylko przy pewnym numerze wersji. Awaryjne odzyskanie rusza, gdy cała treść jest uszkodzona. */
+export function writeAfterReread(error: unknown | null, fresh: number | null, expected: number): "write" | "conflict" | "stop" {
+  if (error) {
+    if (error instanceof Error && error.message === "Aktywna treść jest uszkodzona.") return "write";
+    return "stop";
+  }
+  if (fresh == null || !Number.isInteger(fresh) || fresh !== expected) return "conflict";
+  return "write";
+}
+
 export const INBOX_TTL_MS = 48 * 60 * 60 * 1000;
 
 /**

@@ -120,6 +120,12 @@ export function sealJson(json: string) {
   return encrypt(json, active.key, active.kid);
 }
 
+export function activeSealKid() {
+  const { active } = loadRing();
+  if (!active) throw new Error("Brak klucza szyfrowania CMS. Ustaw CMS_SEAL_KEY na serwerze.");
+  return active.kid;
+}
+
 /** Tylko do testów i starych kopii. Nowe zapisy używają sealJson. */
 export function sealWithEditorPassword(json: string, password: string) {
   if (!password.trim()) throw new Error("Brak hasła edytora.");
@@ -138,7 +144,11 @@ export function openJson(raw: unknown) {
     if (!found) {
       throw new Error(`Nie da się odczytać kopii. Brak klucza ${box.kid}. Dopisz go do CMS_SEAL_KEYS. Dane nie zostały skasowane.`);
     }
-    return decrypt(packed, found.key);
+    try {
+      return decrypt(packed, found.key);
+    } catch {
+      throw new Error("Kopia jest uszkodzona.");
+    }
   }
   const passwords = legacyPasswords();
   if (!passwords.length) throw new Error("Nie da się odczytać starej kopii. Ustaw CMS_SEAL_LEGACY_PASSWORD.");

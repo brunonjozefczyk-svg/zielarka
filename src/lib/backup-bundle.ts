@@ -323,6 +323,8 @@ export type ManifestFile = {
   mime: BackupFile["mime"];
   sha256: string;
   slices: number;
+  /** Klucz, którym zaszyfrowano części. Puste = stara ścieżka bez identyfikatora. */
+  kid?: string;
 };
 
 export type BackupManifest = {
@@ -334,6 +336,8 @@ export type BackupManifest = {
   textSha: string;
   doc: BackupDoc;
   files: ManifestFile[];
+  /** Klucz, którym zaszyfrowano ten manifest i jego nowe części. Stare kopie go nie mają. */
+  sealKid?: string;
 };
 
 export { RAW_SLICE, SERVER_PAYLOAD_LIMIT };
@@ -343,6 +347,37 @@ export function sliceBytes(bytes: Buffer, size = RAW_SLICE): Buffer[] {
   const out: Buffer[] = [];
   for (let offset = 0; offset < bytes.length; offset += size) out.push(bytes.subarray(offset, offset + size));
   return out;
+}
+
+const PART_KID = /^k[1-9]\d{0,2}$/;
+
+/** Nowa kopia dostaje własną ścieżkę klucza. Stary plik części nie jest nadpisywany. */
+export function partPath(sha256: string, slice: number, kid = ""): string {
+  const safe = sha256.toLowerCase();
+  if (kid && PART_KID.test(kid)) return `zielarka/backups/parts/${safe}/${kid}/${slice}.json`;
+  return `zielarka/backups/parts/${safe}/${slice}.json`;
+}
+
+/** Najpierw ścieżka klucza z manifestu, potem stara ścieżka. Innego klucza nie ruszamy. */
+export function partCandidates(sha256: string, slice: number, kid = ""): string[] {
+  const primary = partPath(sha256, slice, kid);
+  const legacy = partPath(sha256, slice);
+  return primary === legacy ? [primary] : [primary, legacy];
+}
+
+/** Gotową część wolno użyć tylko wtedy, gdy leży pod aktualnym kluczem. Część k1 nie wystarcza manifestowi k2. */
+export function canReuseSlice(storedKid: unknown, activeKid: string) {
+  return typeof storedKid === "string" && storedKid === activeKid && PART_KID.test(activeKid);
+}
+
+/** Klucze potrzebne do tej kopii na serwerze. Pobrany plik jest potem ponownie szyfrowany aktualnym kluczem. */
+export function keysRequired(manifest: { sealKid?: string; files?: { kid?: string }[] }) {
+  const kids = new Set<string>();
+  if (manifest.sealKid && PART_KID.test(manifest.sealKid)) kids.add(manifest.sealKid);
+  for (const file of manifest.files || []) {
+    if (file.kid && PART_KID.test(file.kid)) kids.add(file.kid);
+  }
+  return [...kids];
 }
 
 export function sliceEnvelope(sha256: string, slice: number, slices: number, bytes: Buffer) {

@@ -8,17 +8,20 @@ import {
   createAttemptLimiter,
   expiredInboxUrls,
   nextAttempt,
-  sameRevisionOrUnreadable,
+  readFailureAction,
+  STORE_OUTAGE,
+  throwIfUncertain,
   toPublicDoc,
   trustPublicPointer,
   urlsToPrune,
+  writeAfterReread,
   lockDecision,
   publicFallback,
   type AttemptRow,
   type StampBlob,
 } from "./cms-guard";
 import { BLOB_PAGE_LIMIT, listAllBlobs } from "./blob-pages";
-import { openJson, payloadSha, sealConfigured, sealJson } from "./draft-seal.server";
+import { openJson, payloadSha, sealConfigured, sealJson, activeSealKid } from "./draft-seal.server";
 import {
   attachManifestParts,
   buildPayload,
@@ -30,6 +33,9 @@ import {
   parseDataUrl,
   planBackupRetention,
   plannedRefs,
+  partPath,
+  partCandidates,
+  canReuseSlice,
   recoverBackup,
   sliceBytes,
   sliceEnvelope,
@@ -41,7 +47,7 @@ import {
   type BackupFile,
   type BackupManifest,
 } from "./backup-bundle";
-import { offsiteDecision } from "./backup-wire";
+import { offsiteDecision, offsiteExportAllowed } from "./backup-wire";
 import { sanitizeStyle, sanitizeStyles, sanitizeTheme, type TextStyle, type ThemeSettings } from "./theme";
 
 export type SiteEdits = {
@@ -65,7 +71,6 @@ const JOURNAL_PUBLIC = "zielarka/journal/public/";
 const JOURNAL_PRIVATE = "zielarka/journal/private/";
 const PUBLIC_CURRENT = "zielarka/journal/public/current.json";
 const BACKUPS = "zielarka/backups/";
-const PARTS = "zielarka/backups/parts/";
 const INBOX = "zielarka/restore-inbox/";
 const SEALED_IMAGES = "zielarka/sealed-images/";
 
@@ -318,8 +323,8 @@ async function readAny(blobs: BlobMeta[]): Promise<{ doc: SiteEdits | null; saw:
     saw = true;
     try {
       return { doc: await fetchDoc(url), saw: true };
-    } catch {
-      // Ten plik jest uszkodzony. Szukamy starszego.
+    } catch (error) {
+      throwIfUncertain(error);
     }
   }
   return { doc: null, saw };
@@ -338,7 +343,8 @@ async function loadLegacy(): Promise<SiteEdits | null> {
   }
   try {
     return await fetchDoc(readUrl(legacy));
-  } catch {
+  } catch (error) {
+    throwIfUncertain(error);
     throw new Error("Aktywna treść jest uszkodzona.");
   }
 }
@@ -352,12 +358,12 @@ async function loadPrivateFresh(): Promise<SiteEdits> {
     saw = true;
     try {
       const opened = openJson(await fetchJson(readUrl(blob)));
-      if (!opened || typeof opened !== "object") continue;
+      if (!opened || typeof opened !== "object") throw new Error("Kopia jest uszkodzona.");
       const url = (opened as { url?: unknown }).url;
-      if (typeof url !== "string" || !url) continue;
+      if (typeof url !== "string" || !url) throw new Error("Kopia jest uszkodzona.");
       return await fetchDoc(url);
-    } catch {
-      // Wskaźnik albo dokument jest uszkodzony. Zostaje starszy plik.
+    } catch (error) {
+      throwIfUncertain(error);
     }
   }
   const sorted = (await blobList(PRIVATE_DOCS))
@@ -369,7 +375,9 @@ async function loadPrivateFresh(): Promise<SiteEdits> {
   try {
     const legacy = await loadLegacy();
     if (legacy) return legacy;
-  } catch {
+  } catch (error) {
+    if (error instanceof Error && error.message === "Aktywna treść jest uszkodzona.") throw error;
+    throwIfUncertain(error);
     saw = true;
   }
   if (saw) throw new Error("Aktywna treść jest uszkodzona.");
@@ -377,9 +385,15 @@ async function loadPrivateFresh(): Promise<SiteEdits> {
 }
 
 async function readPublicPointer(): Promise<SiteEdits | null> {
+  let head: BlobMeta | null;
   try {
-    const head = await blobHead(PUBLIC_CURRENT);
-    if (!head || !readUrl(head)) return null;
+    head = await blobHead(PUBLIC_CURRENT);
+  } catch (error) {
+    throwIfUncertain(error);
+    return null;
+  }
+  if (!head || !readUrl(head)) return null;
+  try {
     const pointer = (await fetchJson(readUrl(head))) as { revision?: unknown; url?: unknown };
     if (typeof pointer.revision !== "number" || typeof pointer.url !== "string" || !pointer.url) return null;
     const next = await blobHead(`${JOURNAL_PUBLIC}${padRevision(pointer.revision + 1)}.json`);
@@ -387,7 +401,8 @@ async function readPublicPointer(): Promise<SiteEdits | null> {
     const doc = toPublicDoc(await fetchDoc(pointer.url));
     if (doc.revision !== pointer.revision) return null;
     return doc;
-  } catch {
+  } catch (error) {
+    throwIfUncertain(error);
     return null;
   }
 }
@@ -418,8 +433,8 @@ async function loadPublic(): Promise<SiteEdits> {
         const doc = toPublicDoc(await fetchDoc(pointer.url));
         publicCache = { at: Date.now(), data: doc };
         return doc;
-      } catch {
-        // Ten wskaźnik jest uszkodzony. Szukamy starszego.
+      } catch (error) {
+        throwIfUncertain(error);
       }
     }
     const pubs = (await blobList(PUBLIC_DOCS))
@@ -435,6 +450,7 @@ async function loadPublic(): Promise<SiteEdits> {
     try {
       legacy = await loadLegacy();
     } catch (error) {
+      if (readFailureAction(error) === "stop") throw error instanceof Error ? error : new Error(STORE_OUTAGE);
       if (journals.length || fromPublic.saw) throw new Error("Aktywna treść jest uszkodzona.");
       throw error;
     }
@@ -533,13 +549,16 @@ async function writeEdits(doc: SiteEdits, afterPrivate?: (written: SiteEdits) =>
   let publicUrl = "";
   try {
     let freshRevision: number | null = null;
-    let unreadable = false;
+    let damaged = false;
     try {
       freshRevision = (await loadPrivateFresh()).revision;
-    } catch {
-      unreadable = true;
+    } catch (error) {
+      if (writeAfterReread(error instanceof Error ? error : new Error(STORE_OUTAGE), null, doc.revision) !== "write") {
+        throw error instanceof Error ? error : new Error(STORE_OUTAGE);
+      }
+      damaged = true;
     }
-    if (sameRevisionOrUnreadable(freshRevision, doc.revision, unreadable) === "conflict") {
+    if (!damaged && writeAfterReread(null, freshRevision, doc.revision) === "conflict") {
       throw new Error("Ktoś zapisał w międzyczasie. Odśwież stronę.");
     }
     privateUrl = (await blobPut(privatePath, sealJson(privateStamp.text), "application/json")).url;
@@ -925,21 +944,34 @@ async function readSealed(url: string) {
   return openJson(await fetchJson(url));
 }
 
+async function findPart(sha256: string, slice: number, kid = "") {
+  for (const pathname of partCandidates(sha256, slice, kid)) {
+    const head = await blobHead(pathname);
+    if (head && readUrl(head)) return head;
+  }
+  return null;
+}
+
 async function storeSlice(sha256: string, slice: number, slices: number, bytes: Buffer) {
+  const kid = activeSealKid();
   const envelope = sliceEnvelope(sha256, slice, slices, bytes);
   const sealed = sealJson(envelope);
   if (sealed.length > SERVER_PAYLOAD_LIMIT) {
     throw new Error("Jedno zdjęcie nie mieści się w limicie Vercel. Kopia nie została uznana za dobrą.");
   }
-  const pathname = `${PARTS}${sha256}/${slice}.json`;
+  const pathname = partPath(sha256, slice, kid);
   const existing = await blobHead(pathname);
   if (existing && readUrl(existing)) {
     try {
-      const opened = (await readSealed(readUrl(existing))) as { sha256?: string; slice?: number; base64?: string };
-      const got = Buffer.from(opened.base64 || "", "base64");
-      if (opened.sha256 === sha256 && opened.slice === slice && got.equals(bytes)) return pathname;
-    } catch {
-      // Zła część pod tym skrótem zostanie nadpisana i sprawdzona ponownie.
+      const raw = await fetchJson(readUrl(existing));
+      const storedKid = raw && typeof raw === "object" ? (raw as { kid?: unknown }).kid : "";
+      if (canReuseSlice(storedKid, kid)) {
+        const opened = openJson(raw) as { sha256?: string; slice?: number; base64?: string };
+        const got = Buffer.from(opened.base64 || "", "base64");
+        if (opened.sha256 === sha256 && opened.slice === slice && got.equals(bytes)) return pathname;
+      }
+    } catch (error) {
+      throwIfUncertain(error);
     }
   }
   const saved = await blobPut(pathname, sealed, "application/json");
@@ -963,10 +995,10 @@ async function storeFileParts(file: BackupFile) {
   return slices.length;
 }
 
-async function readFileParts(sha256: string, slices: number) {
+async function readFileParts(sha256: string, slices: number, kid = "") {
   const parts: { slice: number; slices: number; base64: string }[] = [];
   for (let index = 0; index < slices; index += 1) {
-    const head = await blobHead(`${PARTS}${sha256}/${index}.json`);
+    const head = await findPart(sha256, index, kid);
     if (!head || !readUrl(head)) throw new Error("W kopii brakuje pliku zdjęcia. Nic nie zostało podmienione.");
     const opened = (await readSealed(readUrl(head))) as { sha256?: string; slice?: number; slices?: number; base64?: string };
     if (opened.sha256 !== sha256 || opened.slice !== index || opened.slices !== slices || typeof opened.base64 !== "string") {
@@ -989,7 +1021,7 @@ async function materializeBackup(opened: unknown): Promise<unknown> {
     if (!shaOk(file.sha256) || !Number.isInteger(file.slices) || file.slices < 1) {
       throw new Error("W kopii brakuje pliku zdjęcia. Nic nie zostało podmienione.");
     }
-    bins.push({ sha256: file.sha256, base64: await readFileParts(file.sha256, file.slices) });
+    bins.push({ sha256: file.sha256, base64: await readFileParts(file.sha256, file.slices, typeof file.kid === "string" ? file.kid : "") });
   }
   const attached = attachManifestParts(manifest, bins);
   if (!attached.ok) throw new Error(attached.error);
@@ -1122,7 +1154,10 @@ export async function createVerifiedBackup(kind: "manual" | "daily" | "monthly",
   const at = new Date().toISOString();
   const payload = buildPayload(kind, at, doc as BackupDoc, files);
   for (const file of payload.files) await storeFileParts(file);
+  const kid = activeSealKid();
   const manifest = toManifest(payload);
+  manifest.sealKid = kid;
+  for (const file of manifest.files) file.kid = kid;
   const sealed = sealJson(JSON.stringify(manifest));
   if (sealed.length > SERVER_PAYLOAD_LIMIT) {
     throw new Error("Manifest kopii jest zbyt duży. Kopia nie została uznana za dobrą.");
@@ -1135,17 +1170,25 @@ export async function createVerifiedBackup(kind: "manual" | "daily" | "monthly",
         : `${BACKUPS}manual/${Date.now()}.json`;
   const saved = await blobPut(name, sealed, "application/json");
   const opened = (await readSealed(saved.url)) as BackupManifest;
-  if (!opened?.docSha || opened.docSha !== payload.docSha || opened.format !== 3) {
+  if (!opened?.docSha || opened.docSha !== payload.docSha || opened.format !== 3 || opened.sealKid !== kid) {
     throw new Error("Kopia nie przeszła sprawdzenia. Nic nie zostało podmienione.");
+  }
+  if ((opened.files || []).some((file) => file.kid !== kid)) {
+    throw new Error("Kopia nie zapisuje, którego klucza potrzebuje. Nic nie zostało podmienione.");
   }
   const bins: { sha256: string; base64: string }[] = [];
   for (const file of opened.files || []) {
-    bins.push({ sha256: file.sha256, base64: await readFileParts(file.sha256, file.slices) });
+    bins.push({
+      sha256: file.sha256,
+      base64: await readFileParts(file.sha256, file.slices, typeof file.kid === "string" ? file.kid : ""),
+    });
   }
   const confirmed = confirmBackupRoundtrip(payload, opened, bins);
   if (!confirmed.ok) throw new Error(confirmed.error);
   const offsite = offsiteDecision(process.env.ZIELARKA_OFFSITE || "");
-  if (offsite.sent) throw new Error("Wysyłka poza magazyn jest wyłączona. Kopia nie została oznaczona jako dobra.");
+  if (offsite.sent || offsiteExportAllowed(process.env.ZIELARKA_OFFSITE_APPROVED || "", process.env.ZIELARKA_OFFSITE || "")) {
+    console.error("Zewnętrzna kopia nie jest podłączona. Nic nie wysłano.");
+  }
   const status = {
     ok: true,
     checked: true,
@@ -1193,16 +1236,20 @@ export async function downloadBackupPart(sha256: string, slice: number) {
   if (!shaOk(sha256) || !Number.isInteger(slice) || slice < 0 || slice > 1000) {
     throw new Error("Nie ma takiej części kopii.");
   }
-  const head = await blobHead(`${PARTS}${sha256}/${slice}.json`);
+  const head = await findPart(sha256, slice, activeSealKid());
   if (!head || !readUrl(head)) throw new Error("Nie ma takiej części kopii.");
   const res = await fetch(readUrl(head), { cache: "no-store" });
   if (!res.ok) throw new Error("Nie ma takiej części kopii.");
-  const sealed = await res.text();
+  const stored = await res.text();
+  if (!stored || stored.length > SERVER_PAYLOAD_LIMIT) {
+    throw new Error("Część kopii nie mieści się w limicie Vercel.");
+  }
+  const opened = openJson(JSON.parse(stored)) as { sha256?: string; slice?: number };
+  if (opened.sha256 !== sha256 || opened.slice !== slice) throw new Error("Część kopii jest uszkodzona.");
+  const sealed = sealJson(JSON.stringify(opened));
   if (!sealed || sealed.length > SERVER_PAYLOAD_LIMIT) {
     throw new Error("Część kopii nie mieści się w limicie Vercel.");
   }
-  const opened = openJson(JSON.parse(sealed)) as { sha256?: string; slice?: number };
-  if (opened.sha256 !== sha256 || opened.slice !== slice) throw new Error("Część kopii jest uszkodzona.");
   return { sha256, slice, sealed };
 }
 

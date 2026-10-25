@@ -44,7 +44,7 @@ async function blobPut(pathname: string, body: BodyInit, contentType: string) {
       "x-content-type": contentType,
       "x-add-random-suffix": "0",
       "x-allow-overwrite": "1",
-      "x-cache-control-max-age": "60",
+      "x-cache-control-max-age": contentType.startsWith("image/") ? "86400" : "0",
     },
     body,
   });

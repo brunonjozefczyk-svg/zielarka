@@ -72,9 +72,44 @@ export function sameRevisionOrUnreadable(fresh: number | null, expected: number,
   return "proceed";
 }
 
-/** Wskaźnik publiczny jest wiarygodny tylko, gdy nie powstała już nowsza wersja. */
-export function trustPublicPointer(pointerRevision: number, nextJournalExists: boolean): boolean {
-  return Number.isInteger(pointerRevision) && pointerRevision >= 0 && nextJournalExists === false;
+/**
+ * Najwyższy numer dziennika. Pusta lista to brak zatwierdzonej wersji, nie „weź wskaźnik”.
+ * Numer musi być całkowity. Luka (jest 12, nie ma 11) nie obniża wyniku.
+ */
+export function newestCommittedRevision(revisions: readonly number[]): number | null {
+  let best: number | null = null;
+  for (const revision of revisions) {
+    if (!Number.isInteger(revision) || revision < 0) continue;
+    if (best === null || revision > best) best = revision;
+  }
+  return best;
+}
+
+/**
+ * Wskaźnik current.json jest wiarygodny tylko, gdy kompletna lista dziennika
+ * ma ten sam najwyższy numer. Sam brak wersji N+1 nie wystarcza: przerwany zapis
+ * N+1 zostawia dziurę, a wersja N+2 może już być opublikowana.
+ * null oznacza, że listy nie mamy (awaria). Wtedy wskaźnikowi nie wolno ufać.
+ */
+export function trustPublicPointer(pointerRevision: number, journalRevisions: readonly number[] | null): boolean {
+  if (!Number.isInteger(pointerRevision) || pointerRevision < 0) return false;
+  if (!journalRevisions) return false;
+  return newestCommittedRevision(journalRevisions) === pointerRevision;
+}
+
+/** null = niepewny magazyn. Nie wolno wtedy podstawić starszego wskaźnika. */
+export function selectPublicRevision(journalRevisions: readonly number[] | null): number | null {
+  if (!journalRevisions) return null;
+  return newestCommittedRevision(journalRevisions);
+}
+
+/**
+ * Najnowszy dziennik przy 404 albo awarii nie schodzi do starszego.
+ * Starszy plik z 404 można pominąć. Uszkodzona treść najnowszego pliku też.
+ */
+export function publicJournalFailure(isNewest: boolean, error: unknown): "stop" | "try-older" {
+  if (isNewest && error instanceof Error && /Odczyt treści nie powiódł się \(404\)/.test(error.message)) return "stop";
+  return readFailureAction(error);
 }
 
 export const STORE_OUTAGE = "Magazyn treści jest chwilowo niedostępny. Zapis został zatrzymany. Nic nie zostało cofnięte.";

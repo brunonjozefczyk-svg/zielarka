@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import test from "node:test";
 import { listAllBlobs, newestRevisionPath, parseBlobListPage, urlsIfComplete } from "./blob-pages.ts";
-import { assertRevision, attemptBlocked, canonicalEdits, chooseFreshRead, classifyLegacy, createAttemptLimiter, draftImageUrls, expiredInboxUrls, herbOutageAction, lockDecision, memWrite, migrationAllowed, migrationPlan, nextAttempt, publicFallback, readFailureAction, restoreAllowed, sameRevisionOrUnreadable, STORE_OUTAGE, throwIfUncertain, toPublicDoc, trustPublicPointer, urlsToPrune, urlsToRetain, writeAfterReread } from "./cms-guard.ts";
+import { assertRevision, attemptBlocked, canonicalEdits, chooseFreshRead, classifyLegacy, createAttemptLimiter, draftImageUrls, expiredInboxUrls, herbOutageAction, lockDecision, memWrite, migrationAllowed, migrationPlan, newestCommittedRevision, nextAttempt, publicFallback, publicJournalFailure, readFailureAction, restoreAllowed, sameRevisionOrUnreadable, selectPublicRevision, STORE_OUTAGE, throwIfUncertain, toPublicDoc, trustPublicPointer, urlsToPrune, urlsToRetain, writeAfterReread } from "./cms-guard.ts";
 import { openJson, payloadSha, resealJson, sealJson, sealWithEditorPassword } from "./draft-seal.server.ts";
 import { normalizeEntry, plainText, slugify, uniqueSlug } from "./entries.ts";
 import { sitemapXml } from "./sitemap.ts";
@@ -372,9 +372,22 @@ test("rotacja klucza k1 na k2 nie zamyka starej kopii", () => {
 });
 
 test("wskaźnik publiczny, konflikt zapisu i stare wgrywanie", () => {
-  assert.equal(trustPublicPointer(4, false), true);
-  assert.equal(trustPublicPointer(4, true), false);
-  assert.equal(trustPublicPointer(1.5, false), false);
+  assert.equal(trustPublicPointer(10, [10]), true);
+  assert.equal(trustPublicPointer(10, [10, 11]), false);
+  assert.equal(trustPublicPointer(10, [10, 12]), false);
+  assert.equal(trustPublicPointer(12, [10, 12]), true);
+  assert.equal(trustPublicPointer(10, null), false);
+  assert.equal(trustPublicPointer(10, []), false);
+  assert.equal(trustPublicPointer(1.5, [1]), false);
+  assert.equal(selectPublicRevision(null), null);
+  assert.equal(selectPublicRevision([10, 12]), 12);
+  assert.equal(selectPublicRevision([12, 10]), 12);
+  assert.equal(newestCommittedRevision([10, 12, 11]), 12);
+  assert.equal(publicJournalFailure(true, new Error("Odczyt treści nie powiódł się (404).")), "stop");
+  assert.equal(publicJournalFailure(false, new Error("Odczyt treści nie powiódł się (404).")), "try-older");
+  assert.equal(publicJournalFailure(true, new Error("Odczyt treści nie powiódł się (503).")), "stop");
+  assert.equal(publicJournalFailure(true, new TypeError("fetch failed")), "stop");
+  assert.equal(publicJournalFailure(true, new Error("Kopia jest uszkodzona.")), "try-older");
   assert.equal(sameRevisionOrUnreadable(null, 3, true), "proceed");
   assert.equal(sameRevisionOrUnreadable(3, 3, false), "proceed");
   assert.equal(sameRevisionOrUnreadable(8, 3, false), "conflict");

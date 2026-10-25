@@ -8,11 +8,12 @@ import {
   createAttemptLimiter,
   expiredInboxUrls,
   nextAttempt,
+  publicJournalFailure,
   readFailureAction,
   STORE_OUTAGE,
   throwIfUncertain,
   toPublicDoc,
-  trustPublicPointer,
+  selectPublicRevision,
   urlsToPrune,
   writeAfterReread,
   lockDecision,
@@ -384,57 +385,45 @@ async function loadPrivateFresh(): Promise<SiteEdits> {
   return empty();
 }
 
-async function readPublicPointer(): Promise<SiteEdits | null> {
-  let head: BlobMeta | null;
-  try {
-    head = await blobHead(PUBLIC_CURRENT);
-  } catch (error) {
-    throwIfUncertain(error);
-    return null;
-  }
-  if (!head || !readUrl(head)) return null;
-  try {
-    const pointer = (await fetchJson(readUrl(head))) as { revision?: unknown; url?: unknown };
-    if (typeof pointer.revision !== "number" || typeof pointer.url !== "string" || !pointer.url) return null;
-    const next = await blobHead(`${JOURNAL_PUBLIC}${padRevision(pointer.revision + 1)}.json`);
-    if (!trustPublicPointer(pointer.revision, Boolean(next && readUrl(next)))) return null;
-    const doc = toPublicDoc(await fetchDoc(pointer.url));
-    if (doc.revision !== pointer.revision) return null;
-    return doc;
-  } catch (error) {
-    throwIfUncertain(error);
-    return null;
-  }
-}
-
 async function writePublicPointer(revision: number, url: string, sha: string) {
   try {
+    const head = await blobHead(PUBLIC_CURRENT);
+    if (head && readUrl(head)) {
+      const prev = (await fetchJson(readUrl(head))) as { revision?: unknown };
+      if (typeof prev.revision === "number" && prev.revision > revision) return;
+    }
     await blobPut(PUBLIC_CURRENT, JSON.stringify({ revision, url, sha }), "application/json");
   } catch {
-    // Pełna lista dziennika i tak znajdzie ten zapis, bo plik następnej wersji już istnieje albo wskaźnik jest stary.
+    // Dziennik publiczny jest już zapisany. Odczyt bierze najwyższy numer, nie ten skrót.
+    // Skrót nie cofa strony, nawet gdy jego zapis się nie uda albo spóźni.
   }
 }
 
 async function loadPublic(): Promise<SiteEdits> {
   if (publicCache && Date.now() - publicCache.at < PUBLIC_CACHE_MS) return publicCache.data;
   try {
-    const fast = await readPublicPointer();
-    if (fast) {
-      publicCache = { at: Date.now(), data: fast };
-      return fast;
-    }
     const journals = (await blobList(JOURNAL_PUBLIC))
       .filter((blob) => blob.pathname && isNumberedJournal(blob.pathname) && readUrl(blob))
       .sort((a, b) => revisionFromPath(String(b.pathname)) - revisionFromPath(String(a.pathname)));
+    const newest = selectPublicRevision(journals.map((blob) => revisionFromPath(String(blob.pathname))));
+    // current.json nie rozstrzyga. Brak pliku N+1 nie znaczy, że nie ma N+2.
     for (const blob of journals) {
+      const revision = revisionFromPath(String(blob.pathname));
+      if (newest === null || revision > newest) continue;
       try {
         const pointer = (await fetchJson(readUrl(blob))) as { url?: string };
-        if (!pointer?.url) continue;
+        if (!pointer?.url) {
+          if (revision === newest) throw new Error("Kopia jest uszkodzona.");
+          continue;
+        }
         const doc = toPublicDoc(await fetchDoc(pointer.url));
         publicCache = { at: Date.now(), data: doc };
         return doc;
       } catch (error) {
-        throwIfUncertain(error);
+        if (publicJournalFailure(revision === newest, error) === "stop") {
+          throwIfUncertain(error);
+          throw new Error(STORE_OUTAGE);
+        }
       }
     }
     const pubs = (await blobList(PUBLIC_DOCS))

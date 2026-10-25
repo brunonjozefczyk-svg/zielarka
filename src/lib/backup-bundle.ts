@@ -6,6 +6,7 @@
 import { createHash } from "node:crypto";
 import { canonicalEdits, restoreAllowed } from "./cms-guard";
 import { payloadSha } from "./draft-seal.server";
+import { RAW_SLICE, SERVER_PAYLOAD_LIMIT } from "./backup-wire";
 
 export type ImageUse = "public" | "draft";
 
@@ -163,7 +164,7 @@ export function verifyPayload(raw: unknown): { ok: true; payload: BackupPayload 
 export function asLegacy(raw: unknown): { doc: BackupDoc; sha: string } | null {
   if (!raw || typeof raw !== "object") return null;
   const row = raw as Record<string, unknown>;
-  if (row.format === 2) return null;
+  if (row.format === 2 || row.format === 3) return null;
   if (row.doc && typeof row.doc === "object" && typeof row.sha === "string") {
     const doc = row.doc as BackupDoc;
     if (payloadSha(canonicalEdits(doc)) !== row.sha) return null;
@@ -315,3 +316,95 @@ export function dropProtected(urls: string[], protect: string[]) {
   const ban = new Set(protect.filter(Boolean));
   return urls.filter((url) => !ban.has(url));
 }
+
+export type ManifestFile = {
+  ref: string;
+  use: ImageUse;
+  mime: BackupFile["mime"];
+  sha256: string;
+  slices: number;
+};
+
+export type BackupManifest = {
+  format: 3;
+  kind: string;
+  at: string;
+  revision: number;
+  docSha: string;
+  textSha: string;
+  doc: BackupDoc;
+  files: ManifestFile[];
+};
+
+export { RAW_SLICE, SERVER_PAYLOAD_LIMIT };
+
+export function sliceBytes(bytes: Buffer, size = RAW_SLICE): Buffer[] {
+  if (!bytes.length) return [];
+  const out: Buffer[] = [];
+  for (let offset = 0; offset < bytes.length; offset += size) out.push(bytes.subarray(offset, offset + size));
+  return out;
+}
+
+export function sliceEnvelope(sha256: string, slice: number, slices: number, bytes: Buffer) {
+  return JSON.stringify({ sha256, slice, slices, base64: bytes.toString("base64") });
+}
+
+export function toManifest(payload: BackupPayload): BackupManifest {
+  return {
+    format: 3,
+    kind: payload.kind,
+    at: payload.at,
+    revision: payload.revision,
+    docSha: payload.docSha,
+    textSha: payload.textSha,
+    doc: payload.doc,
+    files: payload.files.map((file) => ({
+      ref: file.ref,
+      use: file.use,
+      mime: file.mime,
+      sha256: file.sha256,
+      slices: sliceBytes(Buffer.from(file.base64, "base64")).length,
+    })),
+  };
+}
+
+export function joinSliceText(parts: { slice: number; slices: number; base64: string }[]): string {
+  const sorted = [...parts].sort((a, b) => a.slice - b.slice);
+  if (!sorted.length) return "";
+  const slices = sorted[0]?.slices ?? 0;
+  if (sorted.length !== slices || sorted.some((part, index) => part.slice !== index || part.slices !== slices)) {
+    throw new Error("W kopii brakuje części zdjęcia. Nic nie zostało podmienione.");
+  }
+  return sorted.map((part) => part.base64).join("");
+}
+
+export function attachManifestParts(
+  manifest: BackupManifest,
+  bins: { sha256: string; base64: string }[],
+): { ok: true; payload: BackupPayload } | { ok: false; error: string } {
+  if (manifest.format !== 3 || !manifest.doc || !Array.isArray(manifest.files)) {
+    return { ok: false, error: "Kopia jest uszkodzona." };
+  }
+  const files: BackupFile[] = [];
+  for (const file of manifest.files) {
+    const bin = bins.find((item) => item.sha256 === file.sha256);
+    if (!bin) return { ok: false, error: "W kopii brakuje pliku zdjęcia. Nic nie zostało podmienione." };
+    const bytes = Buffer.from(bin.base64, "base64");
+    if (sha256Bytes(bytes) !== file.sha256 || sniffImage(bytes) !== file.mime) {
+      return { ok: false, error: "Plik zdjęcia w kopii jest uszkodzony. Nic nie zostało podmienione." };
+    }
+    files.push({ ref: file.ref, use: file.use, mime: file.mime, sha256: file.sha256, base64: bin.base64 });
+  }
+  const payload: BackupPayload = {
+    format: 2,
+    kind: manifest.kind,
+    at: manifest.at,
+    revision: manifest.revision,
+    docSha: manifest.docSha,
+    textSha: manifest.textSha,
+    doc: manifest.doc,
+    files,
+  };
+  return verifyPayload(payload);
+}
+

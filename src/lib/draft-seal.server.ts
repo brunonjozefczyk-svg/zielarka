@@ -2,16 +2,19 @@ import { createCipheriv, createDecipheriv, createHash, randomBytes, scryptSync }
 
 /**
  * Klucz zapisu (CMS_SEAL_KEY) jest niezależny od hasła edytora.
- * Rotacja: ustaw nowy klucz jako CMS_SEAL_KEY (kid k1), a poprzedni dopisz
- * do CMS_SEAL_KEYS jako "k0:<base64>". Odczyt użyje kid z koperty.
- * Stare kopie bez kid (tylko hasło) otwiera EDITOR_PASSWORD, a po jego zmianie
- * CMS_SEAL_LEGACY_PASSWORD. Nowe zapisy zawsze idą kluczem k1.
+ * Sam base64 oznacza identyfikator k1 — tak są oznaczone dotychczasowe koperty.
+ * Nowy klucz podawaj z własnym identyfikatorem: CMS_SEAL_KEY="k2:<base64>".
+ * Poprzednie klucze zostaw w CMS_SEAL_KEYS jako "k1:<base64>,k3:<base64>".
+ * Nie podmieniaj wartości pod tym samym identyfikatorem. Stare kopie bez kid
+ * otwiera CMS_SEAL_LEGACY_PASSWORD, a gdy go nie ma — EDITOR_PASSWORD.
  * Klucza nie ma w repozytorium. Wygeneruj: node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
  */
 const PASSWORD_SALT = "zielarka-drafts-v1";
-const CURRENT_KID = "k1";
+const LEGACY_KID = "k1";
+const KID_RE = /^k[1-9]\d{0,2}$/;
 
-type Ring = { raw: string; keys: { kid: string; key: Buffer }[] };
+type KeyRec = { kid: string; key: Buffer };
+type Ring = { raw: string; active: KeyRec | null; keys: KeyRec[] };
 
 let ringCache: Ring | null = null;
 
@@ -24,27 +27,58 @@ function passwordKey(secret: string) {
   return scryptSync(secret, PASSWORD_SALT, 32);
 }
 
-export function sealConfigured() {
-  return Boolean(decodeKey(process.env.CMS_SEAL_KEY?.trim() || ""));
+export function splitSealToken(value: string): KeyRec | null {
+  const raw = value.trim();
+  if (!raw) return null;
+  const colon = raw.indexOf(":");
+  if (colon > 0) {
+    const kid = raw.slice(0, colon).trim();
+    if (!KID_RE.test(kid)) return null;
+    const key = decodeKey(raw.slice(colon + 1));
+    return key ? { kid, key } : null;
+  }
+  const key = decodeKey(raw);
+  return key ? { kid: LEGACY_KID, key } : null;
 }
 
-function ring(): Ring {
+function addKey(keys: KeyRec[], item: KeyRec) {
+  const found = keys.find((row) => row.kid === item.kid);
+  if (!found) {
+    keys.push(item);
+    return;
+  }
+  if (!found.key.equals(item.key)) {
+    throw new Error(`Identyfikator ${item.kid} wskazuje dwa różne klucze. Nic nie zostało zapisane ani skasowane.`);
+  }
+}
+
+function loadRing(): Ring {
   const currentRaw = process.env.CMS_SEAL_KEY?.trim() || "";
   const extra = process.env.CMS_SEAL_KEYS?.trim() || "";
   const raw = `${currentRaw}|${extra}`;
   if (ringCache?.raw === raw) return ringCache;
-  const keys: Ring["keys"] = [];
-  const current = decodeKey(currentRaw);
-  if (current) keys.push({ kid: CURRENT_KID, key: current });
-  for (const part of extra.split(",")) {
-    const splitAt = part.indexOf(":");
-    if (splitAt < 1) continue;
-    const kid = part.slice(0, splitAt).trim();
-    const key = decodeKey(part.slice(splitAt + 1));
-    if (kid && key && kid !== CURRENT_KID) keys.push({ kid, key });
+  const active = currentRaw ? splitSealToken(currentRaw) : null;
+  if (currentRaw && !active) {
+    throw new Error("CMS_SEAL_KEY jest niepoprawny. Zapis został zatrzymany. Dane nie zostały skasowane.");
   }
-  ringCache = { raw, keys };
+  const keys: KeyRec[] = [];
+  if (active) addKey(keys, active);
+  for (const part of extra.split(",")) {
+    if (!part.trim()) continue;
+    const item = splitSealToken(part);
+    if (!item) throw new Error("CMS_SEAL_KEYS ma niepoprawny zapis. Odczyt został zatrzymany. Dane nie zostały skasowane.");
+    addKey(keys, item);
+  }
+  ringCache = { raw, active, keys };
   return ringCache;
+}
+
+export function sealConfigured() {
+  try {
+    return Boolean(loadRing().active);
+  } catch {
+    return false;
+  }
 }
 
 function legacyPasswords() {
@@ -81,9 +115,9 @@ function decrypt(box: { iv: string; tag: string; data: string }, key: Buffer) {
 }
 
 export function sealJson(json: string) {
-  const found = ring().keys.find((item) => item.kid === CURRENT_KID);
-  if (!found) throw new Error("Brak klucza szyfrowania CMS. Ustaw CMS_SEAL_KEY na serwerze.");
-  return encrypt(json, found.key, CURRENT_KID);
+  const { active } = loadRing();
+  if (!active) throw new Error("Brak klucza szyfrowania CMS. Ustaw CMS_SEAL_KEY na serwerze.");
+  return encrypt(json, active.key, active.kid);
 }
 
 /** Tylko do testów i starych kopii. Nowe zapisy używają sealJson. */
@@ -100,22 +134,22 @@ export function openJson(raw: unknown) {
   }
   const packed = { iv: box.iv, tag: box.tag, data: box.data };
   if (typeof box.kid === "string" && box.kid) {
-    const found = ring().keys.find((item) => item.kid === box.kid);
-    if (!found) throw new Error("Nie da się odczytać kopii. Brak pasującego klucza.");
+    const found = loadRing().keys.find((item) => item.kid === box.kid);
+    if (!found) {
+      throw new Error(`Nie da się odczytać kopii. Brak klucza ${box.kid}. Dopisz go do CMS_SEAL_KEYS. Dane nie zostały skasowane.`);
+    }
     return decrypt(packed, found.key);
   }
   const passwords = legacyPasswords();
   if (!passwords.length) throw new Error("Nie da się odczytać starej kopii. Ustaw CMS_SEAL_LEGACY_PASSWORD.");
-  let failed = true;
   for (const secret of passwords) {
     try {
       return decrypt(packed, passwordKey(secret));
     } catch {
-      failed = true;
+      // Następne hasło.
     }
   }
-  if (failed) throw new Error("Nie da się odczytać starej kopii. Hasło sprzed zmiany ustaw jako CMS_SEAL_LEGACY_PASSWORD.");
-  throw new Error("Nie da się odczytać kopii.");
+  throw new Error("Nie da się odczytać starej kopii. Hasło sprzed zmiany ustaw jako CMS_SEAL_LEGACY_PASSWORD.");
 }
 
 export function resealJson(raw: unknown) {

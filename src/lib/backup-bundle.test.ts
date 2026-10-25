@@ -2,17 +2,26 @@ import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import test from "node:test";
 import {
+  attachManifestParts,
   buildPayload,
   dropProtected,
   fileFromBytes,
   isBlankDoc,
+  joinSliceText,
   plannedRefs,
   recoverBackup,
   restoreGate,
+  sha256Bytes,
+  sliceBytes,
+  sliceEnvelope,
+  toManifest,
   verifyPayload,
+  RAW_SLICE,
+  SERVER_PAYLOAD_LIMIT,
   type BackupDoc,
   type BackupFile,
 } from "./backup-bundle.ts";
+import { OFFSITE_AUTOMATIC } from "./backup-wire.ts";
 import { openJson, sealJson } from "./draft-seal.server.ts";
 import { parseStoredEntry } from "./entries.ts";
 
@@ -292,4 +301,114 @@ test("przerwany zapis i stara kopia bez zdjęć nie podmieniają strony", async 
   });
   assert.equal(legacy.ok, false);
   assert.equal(committed, false);
+});
+
+test("części kopii składają 1, 4, 10, 25 i 50 MB", () => {
+  const previous = process.env.CMS_SEAL_KEY;
+  process.env.CMS_SEAL_KEY = randomBytes(32).toString("base64");
+  try {
+    assert.equal(RAW_SLICE % 3, 0);
+    assert.equal(OFFSITE_AUTOMATIC, false);
+    const sealed = sealJson(sliceEnvelope("a".repeat(64), 0, 1, Buffer.alloc(RAW_SLICE, 9)));
+    assert.ok(sealed.length <= SERVER_PAYLOAD_LIMIT);
+    for (const size of [1, 4, 10, 25, 50].map((megabytes) => megabytes * 1024 * 1024)) {
+      const bytes = Buffer.alloc(size, 3);
+      PNG.copy(bytes);
+      const sha = sha256Bytes(bytes);
+      const slices = sliceBytes(bytes);
+      const joined = joinSliceText(
+        slices.map((slice, index) => ({ slice: index, slices: slices.length, base64: slice.toString("base64") })),
+      );
+      assert.equal(sha256Bytes(Buffer.from(joined, "base64")), sha);
+      for (const [index, slice] of slices.entries()) {
+        assert.ok(sliceEnvelope(sha, index, slices.length, slice).length < SERVER_PAYLOAD_LIMIT);
+      }
+    }
+  } finally {
+    if (previous === undefined) delete process.env.CMS_SEAL_KEY;
+    else process.env.CMS_SEAL_KEY = previous;
+  }
+});
+
+test("kopia większa niż 4 MB wraca ze zdjęciami, a brak części nic nie zapisuje", async () => {
+  const previous = process.env.CMS_SEAL_KEY;
+  process.env.CMS_SEAL_KEY = randomBytes(32).toString("base64");
+  try {
+    const image = Buffer.alloc(2_400_000, 2);
+    PNG.copy(image);
+    const draftImage = Buffer.from(image);
+    draftImage[draftImage.length - 1] = 9;
+    const published = fileFromBytes("https://cdn.example/a.png", "public", image);
+    const draft = fileFromBytes("seal:draft", "draft", draftImage);
+    assert.ok(published && draft);
+    const doc = docWith("https://cdn.example/a.png", "seal:draft");
+    const payload = buildPayload("pobranie", "2026-10-25T00:00:00.000Z", doc, [published, draft]);
+    assert.ok(JSON.stringify(payload).length > 4_000_000);
+    const manifest = toManifest(payload);
+    const bins = manifest.files.map((file) => {
+      const source = file.sha256 === draft.sha256 ? draft : published;
+      const slices = sliceBytes(Buffer.from(source.base64, "base64"));
+      assert.equal(slices.length, file.slices);
+      const sealedParts = slices.map((slice, index) => sealJson(sliceEnvelope(file.sha256, index, slices.length, slice)));
+      for (const part of sealedParts) {
+        assert.ok(part.length <= SERVER_PAYLOAD_LIMIT);
+        assert.equal(part.includes("Sekretna"), false);
+      }
+      const opened = sealedParts.map(
+        (part) => openJson(JSON.parse(part)) as { slice: number; slices: number; base64: string },
+      );
+      return { sha256: file.sha256, base64: joinSliceText(opened) };
+    });
+    const attached = attachManifestParts(manifest, bins);
+    assert.equal(attached.ok, true);
+    if (!attached.ok) return;
+    const store = new Map<string, Buffer>();
+    const restored = await recoverBackup({
+      phrase: "PRZYWRÓĆ",
+      expectedRevision: 4,
+      raw: attached.payload,
+      readCurrent: async () => null,
+      revisionHint: async () => 0,
+      snapshot: async () => undefined,
+      legacyFiles: async () => null,
+      putImage: async (file) => {
+        const url = `mem://${file.sha256}`;
+        store.set(url, Buffer.from(file.base64, "base64"));
+        return url;
+      },
+      writeDoc: async (next, check) => {
+        await check(next);
+        store.set("doc", Buffer.from(JSON.stringify(next)));
+        return 8;
+      },
+      readBack: async () => JSON.parse(store.get("doc")?.toString("utf8") || "{}") as BackupDoc,
+      readImage: async (url) => store.get(url) ?? null,
+    });
+    assert.equal(restored.ok, true);
+    assert.equal(store.get("mem://" + published.sha256)?.equals(image), true);
+    assert.equal(store.get("mem://" + draft.sha256)?.equals(draftImage), true);
+    assert.equal(attachManifestParts(manifest, bins.slice(0, 1)).ok, false);
+    let wrote = false;
+    const missed = await recoverBackup({
+      phrase: "PRZYWRÓĆ",
+      expectedRevision: 4,
+      raw: manifest,
+      readCurrent: async () => null,
+      revisionHint: async () => 0,
+      snapshot: async () => undefined,
+      legacyFiles: async () => null,
+      putImage: async () => "mem://no",
+      writeDoc: async () => {
+        wrote = true;
+        return 1;
+      },
+      readBack: async () => doc,
+      readImage: async () => image,
+    });
+    assert.equal(missed.ok, false);
+    assert.equal(wrote, false);
+  } finally {
+    if (previous === undefined) delete process.env.CMS_SEAL_KEY;
+    else process.env.CMS_SEAL_KEY = previous;
+  }
 });

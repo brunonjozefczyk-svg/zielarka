@@ -1,4 +1,4 @@
-import { createHash, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { herbs } from "./herbs";
 import { builtinSlugs, type ManagedEntry, normalizeEntry, parseStoredEntry, slugify } from "./entries";
 import {
@@ -16,18 +16,27 @@ import {
   type KeptBlob,
   type StampBlob,
 } from "./cms-guard";
+import { BLOB_PAGE_LIMIT, listAllBlobs } from "./blob-pages";
 import { openJson, payloadSha, sealConfigured, sealJson } from "./draft-seal.server";
 import {
+  attachManifestParts,
   buildPayload,
   bundledAsset,
   dropProtected,
   fileFromBytes,
+  joinSliceText,
   parseDataUrl,
   plannedRefs,
   recoverBackup,
+  sliceBytes,
+  sliceEnvelope,
   sniffImage,
+  sha256Bytes,
+  toManifest,
+  SERVER_PAYLOAD_LIMIT,
   type BackupDoc,
   type BackupFile,
+  type BackupManifest,
 } from "./backup-bundle";
 import { sanitizeStyle, sanitizeStyles, sanitizeTheme, type TextStyle, type ThemeSettings } from "./theme";
 
@@ -51,6 +60,8 @@ const AUTH = "zielarka/auth/";
 const JOURNAL_PUBLIC = "zielarka/journal/public/";
 const JOURNAL_PRIVATE = "zielarka/journal/private/";
 const BACKUPS = "zielarka/backups/";
+const PARTS = "zielarka/backups/parts/";
+const INBOX = "zielarka/restore-inbox/";
 const SEALED_IMAGES = "zielarka/sealed-images/";
 
 function empty(): SiteEdits {
@@ -153,13 +164,16 @@ type BlobMeta = { url?: string; downloadUrl?: string; pathname?: string; uploade
 async function blobList(prefix: string) {
   const key = token();
   if (!key) throw new Error("Brak magazynu treści.");
-  const url = `https://vercel.com/api/blob/?${new URLSearchParams({ prefix, limit: "100" })}`;
-  const res = await fetch(url, {
-    headers: { authorization: `Bearer ${key}`, "x-api-version": BLOB_API },
+  return listAllBlobs(async (cursor) => {
+    const params = new URLSearchParams({ prefix, limit: String(BLOB_PAGE_LIMIT) });
+    if (cursor) params.set("cursor", cursor);
+    const url = `https://vercel.com/api/blob/?${params}`;
+    const res = await fetch(url, {
+      headers: { authorization: `Bearer ${key}`, "x-api-version": BLOB_API },
+    });
+    if (!res.ok) throw new Error(`Odczyt nie powiódł się (${res.status}).`);
+    return res.json() as Promise<unknown>;
   });
-  if (!res.ok) throw new Error(`Odczyt nie powiódł się (${res.status}).`);
-  const data = (await res.json()) as { blobs?: BlobMeta[] };
-  return data.blobs ?? [];
 }
 
 async function blobHead(pathname: string) {
@@ -763,10 +777,14 @@ export async function listBackupRows() {
       revision: revisionFromPath(pathname),
     });
   }
-  const backups = await blobList(BACKUPS);
+  const backups = [
+    ...(await blobList(`${BACKUPS}daily/`)),
+    ...(await blobList(`${BACKUPS}monthly/`)),
+    ...(await blobList(`${BACKUPS}manual/`)),
+  ];
   for (const blob of backups) {
     const pathname = blob.pathname || "";
-    if (!pathname || pathname.endsWith("status.json")) continue;
+    if (!pathname || pathname.endsWith("status.json") || pathname.includes("/parts/")) continue;
     const kind = pathname.includes("/daily/") ? "dzienna" : pathname.includes("/monthly/") ? "miesięczna" : "ręczna";
     rows.push({
       id: pathname,
@@ -833,20 +851,143 @@ async function revisionHint() {
   }
 }
 
+function sessionOk(session: string) {
+  return /^[a-f0-9]{32}$/.test(session);
+}
+
+function shaOk(sha256: string) {
+  return /^[a-f0-9]{64}$/.test(sha256);
+}
+
+async function readSealed(url: string) {
+  return openJson(await fetchJson(url));
+}
+
+async function storeSlice(sha256: string, slice: number, slices: number, bytes: Buffer) {
+  const envelope = sliceEnvelope(sha256, slice, slices, bytes);
+  const sealed = sealJson(envelope);
+  if (sealed.length > SERVER_PAYLOAD_LIMIT) {
+    throw new Error("Jedno zdjęcie nie mieści się w limicie Vercel. Kopia nie została uznana za dobrą.");
+  }
+  const pathname = `${PARTS}${sha256}/${slice}.json`;
+  const existing = await blobHead(pathname);
+  if (existing && readUrl(existing)) {
+    try {
+      const opened = (await readSealed(readUrl(existing))) as { sha256?: string; slice?: number; base64?: string };
+      const got = Buffer.from(opened.base64 || "", "base64");
+      if (opened.sha256 === sha256 && opened.slice === slice && got.equals(bytes)) return pathname;
+    } catch {
+      // Zła część pod tym skrótem zostanie nadpisana i sprawdzona ponownie.
+    }
+  }
+  const saved = await blobPut(pathname, sealed, "application/json");
+  const opened = (await readSealed(saved.url)) as { sha256?: string; slice?: number; base64?: string };
+  const got = Buffer.from(opened.base64 || "", "base64");
+  if (opened.sha256 !== sha256 || opened.slice !== slice || !got.equals(bytes)) {
+    throw new Error("Część kopii nie przeszła sprawdzenia. Kopia nie została uznana za dobrą.");
+  }
+  return pathname;
+}
+
+async function storeFileParts(file: BackupFile) {
+  const bytes = Buffer.from(file.base64, "base64");
+  if (sha256Bytes(bytes) !== file.sha256) throw new Error("Plik zdjęcia nie zgadza się z manifestem.");
+  const slices = sliceBytes(bytes);
+  for (let index = 0; index < slices.length; index += 1) {
+    const slice = slices[index];
+    if (!slice) continue;
+    await storeSlice(file.sha256, index, slices.length, slice);
+  }
+  return slices.length;
+}
+
+async function readFileParts(sha256: string, slices: number) {
+  const parts: { slice: number; slices: number; base64: string }[] = [];
+  for (let index = 0; index < slices; index += 1) {
+    const head = await blobHead(`${PARTS}${sha256}/${index}.json`);
+    if (!head || !readUrl(head)) throw new Error("W kopii brakuje pliku zdjęcia. Nic nie zostało podmienione.");
+    const opened = (await readSealed(readUrl(head))) as { sha256?: string; slice?: number; slices?: number; base64?: string };
+    if (opened.sha256 !== sha256 || opened.slice !== index || opened.slices !== slices || typeof opened.base64 !== "string") {
+      throw new Error("Plik zdjęcia w kopii jest uszkodzony. Nic nie zostało podmienione.");
+    }
+    parts.push({ slice: index, slices, base64: opened.base64 });
+  }
+  const base64 = joinSliceText(parts);
+  if (sha256Bytes(Buffer.from(base64, "base64")) !== sha256) {
+    throw new Error("Plik zdjęcia w kopii jest uszkodzony. Nic nie zostało podmienione.");
+  }
+  return base64;
+}
+
+async function materializeBackup(opened: unknown): Promise<unknown> {
+  if (!opened || typeof opened !== "object" || (opened as { format?: unknown }).format !== 3) return opened;
+  const manifest = opened as BackupManifest;
+  const bins: { sha256: string; base64: string }[] = [];
+  for (const file of manifest.files || []) {
+    if (!shaOk(file.sha256) || !Number.isInteger(file.slices) || file.slices < 1) {
+      throw new Error("W kopii brakuje pliku zdjęcia. Nic nie zostało podmienione.");
+    }
+    bins.push({ sha256: file.sha256, base64: await readFileParts(file.sha256, file.slices) });
+  }
+  const attached = attachManifestParts(manifest, bins);
+  if (!attached.ok) throw new Error(attached.error);
+  return attached.payload;
+}
+
+async function referencedShas(blob: BlobMeta) {
+  const url = readUrl(blob);
+  if (!url) throw new Error("Nie da się odczytać zachowanej kopii. Przycinanie zostało zatrzymane.");
+  const opened = await readSealed(url);
+  if (!opened || typeof opened !== "object") throw new Error("Nie da się odczytać zachowanej kopii. Przycinanie zostało zatrzymane.");
+  const files = (opened as { files?: { sha256?: string }[] }).files;
+  if (!Array.isArray(files)) return [] as string[];
+  return files.flatMap((file) => (typeof file.sha256 === "string" ? [file.sha256] : []));
+}
+
+async function pruneBackups(protect: string[]) {
+  const blobs = await blobList(BACKUPS);
+  const manifests = blobs.filter((blob) => {
+    const pathname = blob.pathname || "";
+    return pathname && !pathname.includes("/parts/") && !pathname.endsWith("status.json");
+  });
+  const kept: KeptBlob[] = manifests.flatMap((blob) => {
+    const pathname = blob.pathname || "";
+    const url = blob.url || "";
+    if (!pathname || !url) return [];
+    return [{ pathname, url, uploadedAt: blobStamp(blob), revision: blobStamp(blob) }];
+  });
+  const removeUrls = new Set(urlsToRetain(kept));
+  const keepBlobs = manifests.filter((blob) => !removeUrls.has(blob.url || ""));
+  const referenced = new Set<string>();
+  for (const blob of keepBlobs) {
+    for (const sha of await referencedShas(blob)) referenced.add(sha);
+  }
+  const partDeletes = blobs.flatMap((blob) => {
+    const pathname = blob.pathname || "";
+    const match = /\/parts\/([a-f0-9]{64})\//.exec(pathname);
+    if (!match?.[1] || referenced.has(match[1])) return [];
+    return [blob.url || "", blob.downloadUrl || ""];
+  });
+  const protectUrls = blobs.flatMap((blob) => {
+    if (!protect.includes(blob.pathname || "")) return [];
+    return [blob.url || "", blob.downloadUrl || ""];
+  });
+  await blobDelete(dropProtected([...removeUrls, ...partDeletes], protectUrls));
+}
+
 async function readBackupRaw(id: string) {
   if (!id.startsWith("zielarka/") || id.includes("..")) throw new Error("Nie ma takiej kopii.");
-  const prefix = id.startsWith(JOURNAL_PRIVATE) ? JOURNAL_PRIVATE : id.startsWith(BACKUPS) ? BACKUPS : "";
-  if (!prefix) throw new Error("Nie ma takiej kopii.");
-  const blobs = await blobList(prefix);
-  const found = blobs.find((blob) => blob.pathname === id);
+  const allowed = id.startsWith(JOURNAL_PRIVATE) || id.startsWith(BACKUPS);
+  if (!allowed || id.includes("/parts/") || id.endsWith("status.json")) throw new Error("Nie ma takiej kopii.");
+  const found = await blobHead(id);
   if (!found || !readUrl(found)) throw new Error("Nie ma takiej kopii.");
   const opened = openJson(await fetchJson(readUrl(found)));
   if (opened && typeof opened === "object" && "url" in opened && !("doc" in opened) && !("format" in opened)) {
     const url = (opened as { url?: string }).url;
     if (!url) throw new Error("Kopia jest uszkodzona.");
-    return openJson(await fetchJson(url));
+    return materializeBackup(openJson(await fetchJson(url)));
   }
-  return opened;
+  return materializeBackup(opened);
 }
 
 async function runRecover(raw: unknown, expectedRevision: number, phrase: string, protectPath: string) {
@@ -895,7 +1036,12 @@ export async function createVerifiedBackup(kind: "manual" | "daily" | "monthly",
   const files = await filesForDoc(doc);
   const at = new Date().toISOString();
   const payload = buildPayload(kind, at, doc as BackupDoc, files);
-  const sealed = sealJson(JSON.stringify(payload));
+  for (const file of payload.files) await storeFileParts(file);
+  const manifest = toManifest(payload);
+  const sealed = sealJson(JSON.stringify(manifest));
+  if (sealed.length > SERVER_PAYLOAD_LIMIT) {
+    throw new Error("Manifest kopii jest zbyt duży. Kopia nie została uznana za dobrą.");
+  }
   const name =
     kind === "daily"
       ? `${BACKUPS}daily/${at.slice(0, 10)}.json`
@@ -903,43 +1049,136 @@ export async function createVerifiedBackup(kind: "manual" | "daily" | "monthly",
         ? `${BACKUPS}monthly/${at.slice(0, 7)}.json`
         : `${BACKUPS}manual/${Date.now()}.json`;
   const saved = await blobPut(name, sealed, "application/json");
-  const opened = openJson(await fetchJson(saved.url)) as { docSha?: string };
-  if (!opened?.docSha || opened.docSha !== payload.docSha) {
+  const opened = (await readSealed(saved.url)) as BackupManifest;
+  if (!opened?.docSha || opened.docSha !== payload.docSha || opened.format !== 3) {
     throw new Error("Kopia nie przeszła sprawdzenia. Nic nie zostało podmienione.");
+  }
+  for (const file of opened.files || []) {
+    const base64 = await readFileParts(file.sha256, file.slices);
+    if (sha256Bytes(Buffer.from(base64, "base64")) !== file.sha256) {
+      throw new Error("Kopia nie przeszła sprawdzenia. Nic nie zostało podmienione.");
+    }
   }
   const status = { ok: true, at, revision: doc.revision, kind, sha: payload.docSha, images: files.length };
   await blobPut(`${BACKUPS}status.json`, JSON.stringify(status), "application/json");
   try {
-    const blobs = await blobList(BACKUPS);
-    const kept: KeptBlob[] = blobs.flatMap((blob) => {
-      const pathname = blob.pathname || "";
-      const url = blob.url || "";
-      if (!pathname || !url || pathname.endsWith("status.json")) return [];
-      return [{ pathname, url, uploadedAt: blobStamp(blob), revision: blobStamp(blob) }];
-    });
-    const protectUrls = blobs.flatMap((blob) => {
-      if (!protect.includes(blob.pathname || "")) return [];
-      return [blob.url || "", blob.downloadUrl || ""];
-    });
-    await blobDelete(dropProtected(urlsToRetain(kept), protectUrls));
+    await pruneBackups(protect);
   } catch {
     // Przycinanie kopii nie rusza świeżo sprawdzonego pliku, jeśli lista zawiedzie.
   }
-  return { ok: true as const, at, revision: doc.revision, kind };
+  return {
+    ok: true as const,
+    at,
+    revision: doc.revision,
+    kind,
+    filename: `zielarka-kopia-${at.slice(0, 10)}.json`,
+    sealedManifest: sealed,
+    parts: manifest.files.flatMap((file) =>
+      Array.from({ length: file.slices }, (_, slice) => ({ sha256: file.sha256, slice })),
+    ),
+  };
 }
 
 export async function downloadBackup() {
-  if (!sealConfigured()) {
-    throw new Error("Brak klucza szyfrowania CMS. Ustaw CMS_SEAL_KEY w Vercel. Plik nie został utworzony.");
-  }
-  const doc = await readForWrite();
-  const files = await filesForDoc(doc);
-  const at = new Date().toISOString();
-  const payload = buildPayload("pobranie", at, doc as BackupDoc, files);
+  const saved = await createVerifiedBackup("manual");
   return {
-    filename: `zielarka-kopia-${at.slice(0, 10)}.json`,
-    body: sealJson(JSON.stringify(payload)),
+    filename: saved.filename,
+    sealedManifest: saved.sealedManifest,
+    parts: saved.parts,
   };
+}
+
+export async function downloadBackupPart(sha256: string, slice: number) {
+  if (!shaOk(sha256) || !Number.isInteger(slice) || slice < 0 || slice > 1000) {
+    throw new Error("Nie ma takiej części kopii.");
+  }
+  const head = await blobHead(`${PARTS}${sha256}/${slice}.json`);
+  if (!head || !readUrl(head)) throw new Error("Nie ma takiej części kopii.");
+  const res = await fetch(readUrl(head), { cache: "no-store" });
+  if (!res.ok) throw new Error("Nie ma takiej części kopii.");
+  const sealed = await res.text();
+  if (!sealed || sealed.length > SERVER_PAYLOAD_LIMIT) {
+    throw new Error("Część kopii nie mieści się w limicie Vercel.");
+  }
+  const opened = openJson(JSON.parse(sealed)) as { sha256?: string; slice?: number };
+  if (opened.sha256 !== sha256 || opened.slice !== slice) throw new Error("Część kopii jest uszkodzona.");
+  return { sha256, slice, sealed };
+}
+
+export async function beginRestoreUpload(sealedManifest: string) {
+  if (sealedManifest.length > SERVER_PAYLOAD_LIMIT) {
+    throw new Error("Manifest kopii jest zbyt duży. Nic nie zostało podmienione.");
+  }
+  let manifest: BackupManifest;
+  try {
+    manifest = openJson(JSON.parse(sealedManifest)) as BackupManifest;
+  } catch {
+    throw new Error("Plik kopii jest nieczytelny. Nic nie zostało podmienione.");
+  }
+  if (!manifest || manifest.format !== 3 || !Array.isArray(manifest.files)) {
+    throw new Error("Kopia jest uszkodzona. Nic nie zostało podmienione.");
+  }
+  const session = randomBytes(16).toString("hex");
+  const saved = await blobPut(`${INBOX}${session}/manifest.json`, sealJson(JSON.stringify(manifest)), "application/json");
+  const opened = (await readSealed(saved.url)) as BackupManifest;
+  if (opened.docSha !== manifest.docSha || opened.files.length !== manifest.files.length) {
+    throw new Error("Manifest kopii nie dał się odczytać. Nic nie zostało podmienione.");
+  }
+  return { session, parts: manifest.files.reduce((sum, file) => sum + file.slices, 0) };
+}
+
+export async function saveRestorePart(session: string, sealed: string) {
+  if (!sessionOk(session)) throw new Error("Nie ma takiego wgrywania. Nic nie zostało podmienione.");
+  if (sealed.length > SERVER_PAYLOAD_LIMIT) {
+    throw new Error("Część kopii jest za duża na jedno przesłanie. Nic nie zostało podmienione.");
+  }
+  let opened: { sha256?: string; slice?: number; slices?: number; base64?: string };
+  try {
+    opened = openJson(JSON.parse(sealed)) as { sha256?: string; slice?: number; slices?: number; base64?: string };
+  } catch {
+    throw new Error("Część kopii jest nieczytelna. Nic nie zostało podmienione.");
+  }
+  if (!opened.sha256 || !shaOk(opened.sha256) || !Number.isInteger(opened.slice) || !Number.isInteger(opened.slices)) {
+    throw new Error("Część kopii jest uszkodzona. Nic nie zostało podmienione.");
+  }
+  const pathname = `${INBOX}${session}/${opened.sha256}/${opened.slice}.json`;
+  const saved = await blobPut(pathname, sealJson(JSON.stringify(opened)), "application/json");
+  const check = (await readSealed(saved.url)) as { sha256?: string; slice?: number };
+  if (check.sha256 !== opened.sha256 || check.slice !== opened.slice) {
+    throw new Error("Część kopii nie dała się odczytać. Nic nie zostało podmienione.");
+  }
+  return { sha256: opened.sha256, slice: opened.slice };
+}
+
+export async function finishRestoreUpload(session: string, expectedRevision: number, phrase: string) {
+  if (!sessionOk(session)) throw new Error("Nie ma takiego wgrywania. Nic nie zostało podmienione.");
+  const head = await blobHead(`${INBOX}${session}/manifest.json`);
+  if (!head || !readUrl(head)) throw new Error("Brak manifestu kopii. Nic nie zostało podmienione.");
+  const manifest = (await readSealed(readUrl(head))) as BackupManifest;
+  const bins: { sha256: string; base64: string }[] = [];
+  for (const file of manifest.files || []) {
+    const parts: { slice: number; slices: number; base64: string }[] = [];
+    for (let index = 0; index < file.slices; index += 1) {
+      const part = await blobHead(`${INBOX}${session}/${file.sha256}/${index}.json`);
+      if (!part || !readUrl(part)) throw new Error("W kopii brakuje pliku zdjęcia. Nic nie zostało podmienione.");
+      const opened = (await readSealed(readUrl(part))) as { slice?: number; slices?: number; base64?: string };
+      if (opened.slice !== index || typeof opened.base64 !== "string") {
+        throw new Error("Plik zdjęcia w kopii jest uszkodzony. Nic nie zostało podmienione.");
+      }
+      parts.push({ slice: index, slices: file.slices, base64: opened.base64 });
+    }
+    bins.push({ sha256: file.sha256, base64: joinSliceText(parts) });
+  }
+  const attached = attachManifestParts(manifest, bins);
+  if (!attached.ok) throw new Error(attached.error);
+  const restored = await runRecover(attached.payload, expectedRevision, phrase, "");
+  try {
+    const leftovers = await blobList(`${INBOX}${session}/`);
+    await blobDelete(leftovers.flatMap((blob) => [blob.url || "", blob.downloadUrl || ""]));
+  } catch {
+    // Skrzynka wgrywania zostaje. Kopia źródłowa i strona nie są przez to kasowane.
+  }
+  return restored;
 }
 
 export async function restoreBackup(id: string, expectedRevision: number, phrase: string) {
@@ -948,6 +1187,9 @@ export async function restoreBackup(id: string, expectedRevision: number, phrase
 }
 
 export async function restoreUploadedBackup(body: string, expectedRevision: number, phrase: string) {
+  if (body.length > SERVER_PAYLOAD_LIMIT) {
+    throw new Error("Ten plik jest za duży na jedno przesłanie. Użyj kopii podzielonej na części. Nic nie zostało podmienione.");
+  }
   let parsed: unknown;
   try {
     parsed = JSON.parse(body);

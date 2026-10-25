@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
+import { randomBytes } from "node:crypto";
 import test from "node:test";
+import { listAllBlobs, newestRevisionPath, parseBlobListPage, urlsIfComplete } from "./blob-pages.ts";
 import { assertRevision, attemptBlocked, canonicalEdits, classifyLegacy, createAttemptLimiter, draftImageUrls, herbOutageAction, lockDecision, memWrite, migrationAllowed, migrationPlan, nextAttempt, publicFallback, restoreAllowed, toPublicDoc, urlsToPrune, urlsToRetain } from "./cms-guard.ts";
 import { openJson, payloadSha, resealJson, sealJson, sealWithEditorPassword } from "./draft-seal.server.ts";
 import { normalizeEntry, plainText, slugify, uniqueSlug } from "./entries.ts";
@@ -257,4 +259,85 @@ test("zła czcionka odpada, a puste rozmiary nie zmieniają strony", () => {
   assert.equal(css?.fontWeight, 700);
   assert.equal(css?.fontStyle, "italic");
   assert.equal(String(css?.fontFamily).includes("color"), false);
+});
+
+test("lista magazynu przechodzi strony 50, 100, 101, 500 i 1000", async () => {
+  async function all(count: number, pageSize: number) {
+    const items = Array.from({ length: count }, (_, index) => ({
+      pathname: `zielarka/journal/private/${String(index + 1).padStart(8, "0")}.json`,
+      url: `https://blob.example/${index + 1}`,
+    }));
+    const blobs = await listAllBlobs(async (cursor) => {
+      const start = cursor ? Number(cursor) : 0;
+      const next = start + pageSize;
+      const hasMore = next < items.length;
+      return { blobs: items.slice(start, next), hasMore, ...(hasMore ? { cursor: String(next) } : {}) };
+    });
+    assert.equal(blobs.length, count);
+    assert.equal(newestRevisionPath(blobs), items[count - 1]?.pathname);
+    if (count > pageSize) {
+      assert.notEqual(newestRevisionPath(items.slice(0, pageSize)), items[count - 1]?.pathname);
+    }
+    return items;
+  }
+  for (const count of [50, 100, 101, 500, 1000]) await all(count, 100);
+  await all(1000, 1000);
+  assert.equal(parseBlobListPage({ blobs: [], hasMore: true }).ok, false);
+  assert.equal(parseBlobListPage({ blobs: [], hasMore: false }).ok, true);
+  await assert.rejects(
+    listAllBlobs(async () => ({ blobs: [{ pathname: "a.json" }], hasMore: true, cursor: "same" })),
+    /zapętliła/,
+  );
+  await assert.rejects(
+    listAllBlobs(async (cursor) => {
+      if (cursor) throw new Error("sieć");
+      return { blobs: [{ pathname: "00000001.json" }], hasMore: true, cursor: "2" };
+    }),
+    /Nic nie zostało skasowane/,
+  );
+  assert.deepEqual(urlsIfComplete(false, ["https://zostaw.example/a"]), []);
+  const kept = urlsToRetain([
+    { pathname: "nowa", url: "https://zostaw.example/nowa", uploadedAt: 2, revision: 2 },
+    { pathname: "stara", url: "https://zostaw.example/stara", uploadedAt: 1, revision: 1 },
+  ]);
+  assert.equal(urlsIfComplete(true, kept).includes("https://zostaw.example/nowa"), false);
+  assert.equal(urlsIfComplete(false, kept).length, 0);
+});
+
+test("rotacja klucza k1 na k2 nie zamyka starej kopii", () => {
+  const previousKey = process.env.CMS_SEAL_KEY;
+  const previousKeys = process.env.CMS_SEAL_KEYS;
+  const previousPassword = process.env.EDITOR_PASSWORD;
+  const key1 = randomBytes(32).toString("base64");
+  const key2 = randomBytes(32).toString("base64");
+  try {
+    process.env.CMS_SEAL_KEY = key1;
+    delete process.env.CMS_SEAL_KEYS;
+    const secretA = "dokument A zostaje";
+    const sealedA = sealJson(JSON.stringify({ lead: secretA }));
+    assert.equal(JSON.parse(sealedA).kid, "k1");
+    assert.equal(sealedA.includes(secretA), false);
+    process.env.CMS_SEAL_KEY = `k2:${key2}`;
+    process.env.CMS_SEAL_KEYS = `k1:${key1}`;
+    process.env.EDITOR_PASSWORD = "inne-haslo-edytora";
+    const secretB = "dokument B jest nowy";
+    const sealedB = sealJson(JSON.stringify({ lead: secretB }));
+    assert.equal(JSON.parse(sealedB).kid, "k2");
+    assert.equal((openJson(JSON.parse(sealedA)) as { lead: string }).lead, secretA);
+    assert.equal((openJson(JSON.parse(sealedB)) as { lead: string }).lead, secretB);
+    delete process.env.CMS_SEAL_KEYS;
+    assert.throws(() => openJson(JSON.parse(sealedA)), /Brak klucza k1/);
+    assert.equal((openJson(JSON.parse(sealedB)) as { lead: string }).lead, secretB);
+    process.env.CMS_SEAL_KEY = key2;
+    process.env.CMS_SEAL_KEYS = `k1:${key1}`;
+    assert.throws(() => sealJson("{}"), /dwa różne klucze/);
+    assert.throws(() => openJson(JSON.parse(sealedB)), /dwa różne klucze/);
+  } finally {
+    if (previousKey === undefined) delete process.env.CMS_SEAL_KEY;
+    else process.env.CMS_SEAL_KEY = previousKey;
+    if (previousKeys === undefined) delete process.env.CMS_SEAL_KEYS;
+    else process.env.CMS_SEAL_KEYS = previousKeys;
+    if (previousPassword === undefined) delete process.env.EDITOR_PASSWORD;
+    else process.env.EDITOR_PASSWORD = previousPassword;
+  }
 });

@@ -1,6 +1,5 @@
 import { useState, type FormEvent } from "react";
 import { Link } from "@tanstack/react-router";
-import { site } from "@/lib/content";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -26,6 +25,8 @@ const empty: Draft = { name: "", email: "", topic: "konsultacja", message: "" };
 
 export function ContactForm() {
   const [draft, setDraft] = useState<Draft>(empty);
+  const [company, setCompany] = useState("");
+  const [sending, setSending] = useState(false);
   const [sent, setSent] = useState(false);
 
   function onSubmit(e: FormEvent) {
@@ -34,11 +35,29 @@ export function ContactForm() {
       toast("Uzupełnij imię, e-mail i wiadomość.");
       return;
     }
-    const entry = { ...draft, at: new Date().toISOString() };
-    const prev = JSON.parse(localStorage.getItem("zielarka-zgloszenia") || "[]") as unknown[];
-    localStorage.setItem("zielarka-zgloszenia", JSON.stringify([entry, ...prev].slice(0, 20)));
-    setSent(true);
-    setDraft(empty);
+    setSending(true);
+    void import("@/lib/site-api")
+      .then(({ sendContactFn }) =>
+        sendContactFn({
+          data: {
+            name: draft.name,
+            email: draft.email,
+            topic: draft.topic,
+            message: draft.message,
+            company,
+          },
+        }),
+      )
+      .then((result) => {
+        if (!result.ok) {
+          toast.error(result.message || "Nie udało się wysłać. Spróbuj jeszcze raz.");
+          return;
+        }
+        setSent(true);
+        setDraft(empty);
+      })
+      .catch(() => toast.error("Nie udało się wysłać. Spróbuj jeszcze raz."))
+      .finally(() => setSending(false));
   }
 
   if (sent) {
@@ -46,12 +65,7 @@ export function ContactForm() {
       <div className="rounded-lg border border-line bg-cream p-8">
         <p className="font-display text-2xl text-forest">Dziękuję.</p>
         <p className="mt-3 max-w-md text-muted leading-relaxed">
-          Ta wiadomość została zapisana tylko w tej przeglądarce. Sabina jej stąd nie dostaje.
-          Napisz do niej na{" "}
-          <a href={site.facebook} className="text-forest underline" target="_blank" rel="noreferrer">
-            Facebooku Zielarka.pl
-          </a>
-          , tam odpisuje.
+          Wiadomość poszła na skrzynkę Sabiny. Odpowiedź przyjdzie na e-mail, który podałeś.
         </p>
         <Button className="mt-6" variant="outline" onClick={() => setSent(false)}>
           Napisz kolejną
@@ -109,16 +123,25 @@ export function ContactForm() {
           placeholder="Kilka zdań o tym, z czym przychodzisz."
         />
       </div>
-      <Button type="submit" size="lg">
-        Zapisz szkic
+      <input
+        type="text"
+        name="company"
+        value={company}
+        onChange={(e) => setCompany(e.target.value)}
+        className="hidden"
+        tabIndex={-1}
+        autoComplete="off"
+        aria-hidden="true"
+      />
+      <Button type="submit" size="lg" disabled={sending}>
+        {sending ? "Wysyłam…" : "Wyślij zgłoszenie"}
       </Button>
       <p className="text-sm leading-relaxed text-muted">
-        Formularz nie wysyła jeszcze maila na skrzynkę Sabiny. Żeby dostać odpowiedź, napisz na{" "}
-        <a href={site.facebook} className="text-forest underline" target="_blank" rel="noreferrer">
-          Facebooku
-        </a>{" "}
-        albo zostaw zgłoszenie i podaj maila w treści — ale dopóki nie podepniemy skrzynki, ta
-        wiadomość zostaje w Twojej przeglądarce.{" "}
+        Albo napisz od razu na{" "}
+        <a href="mailto:kontakt@zielarka.pl" className="text-forest underline">
+          kontakt@zielarka.pl
+        </a>
+        .{" "}
         <Link to="/konsultacje" className="text-forest underline">
           Jak wygląda konsultacja
         </Link>

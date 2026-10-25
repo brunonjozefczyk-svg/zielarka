@@ -6,6 +6,8 @@ export type SiteEdits = {
   herbs: Record<string, unknown>;
 };
 
+const empty = (): SiteEdits => ({ copy: {}, images: {}, herbs: {} });
+
 export const loadSiteEdits = createServerFn({ method: "GET" }).handler(async () => {
   const { readEdits } = await import("./site-store.server");
   return readEdits();
@@ -63,5 +65,57 @@ export const saveHerbFn = createServerFn({ method: "POST" })
     const { passwordOk, saveHerb } = await import("./site-store.server");
     if (!passwordOk(data.password)) return { ok: false as const };
     await saveHerb(data.slug, data.copy);
+    return { ok: true as const };
+  });
+
+export { empty };
+
+const CONTACT_TOPICS = new Set(["konsultacja", "warsztat", "spacer", "klub", "inne"]);
+const CONTACT_LABELS: Record<string, string> = {
+  konsultacja: "Konsultacja 1:1",
+  warsztat: "Warsztat",
+  spacer: "Spacer zielarski",
+  klub: "Klub Zielarski",
+  inne: "Inne",
+};
+
+export const sendContactFn = createServerFn({ method: "POST" })
+  .validator((data: { name: string; email: string; topic: string; message: string; company?: string }) => {
+    const name = data.name?.trim() ?? "";
+    const email = data.email?.trim() ?? "";
+    const topic = data.topic?.trim() ?? "";
+    const message = data.message?.trim() ?? "";
+    const company = data.company?.trim() ?? "";
+    if (company) return { name, email, topic, message, company, spam: true as const };
+    if (name.length < 2 || name.length > 80) throw new Error("Podaj imię.");
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 120) {
+      throw new Error("Podaj poprawny e-mail.");
+    }
+    if (!CONTACT_TOPICS.has(topic)) throw new Error("Wybierz temat.");
+    if (message.length < 10 || message.length > 4000) {
+      throw new Error("Wiadomość jest za krótka albo za długa.");
+    }
+    return { name, email, topic, message, company: "", spam: false as const };
+  })
+  .handler(async ({ data }) => {
+    if (data.spam) return { ok: true as const };
+    const response = await fetch("https://formsubmit.co/ajax/kontakt@zielarka.pl", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify({
+        name: data.name,
+        email: data.email,
+        _replyto: data.email,
+        _subject: `Zielarka.pl — ${CONTACT_LABELS[data.topic]} — ${data.name}`,
+        temat: CONTACT_LABELS[data.topic],
+        message: data.message,
+        _template: "table",
+        _captcha: "false",
+      }),
+    });
+    const body = (await response.json().catch(() => ({}))) as { success?: string; message?: string };
+    if (String(body.success) !== "true") {
+      return { ok: false as const, message: body.message ?? "Nie udało się wysłać." };
+    }
     return { ok: true as const };
   });

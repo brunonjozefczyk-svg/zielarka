@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import test from "node:test";
 import { listAllBlobs, newestRevisionPath, parseBlobListPage, urlsIfComplete } from "./blob-pages.ts";
-import { assertRevision, attemptBlocked, canonicalEdits, chooseFreshRead, classifyLegacy, createAttemptLimiter, draftImageUrls, expiredInboxUrls, herbOutageAction, lockDecision, memWrite, migrationAllowed, migrationPlan, newestCommittedRevision, nextAttempt, publicFallback, publicJournalFailure, readFailureAction, restoreAllowed, sameRevisionOrUnreadable, selectPublicRevision, STORE_OUTAGE, throwIfUncertain, toPublicDoc, trustPublicPointer, urlsToPrune, urlsToRetain, writeAfterReread } from "./cms-guard.ts";
+import { assertRevision, attemptBlocked, canonicalEdits, chooseFreshRead, classifyLegacy, createAttemptLimiter, draftImageUrls, expiredInboxUrls, herbOutageAction, journalStep, judgeJournal, lockDecision, memWrite, migrationAllowed, migrationPlan, newestCommittedRevision, nextAttempt, publicFallback, publicJournalFailure, publicReadCost, readFailureAction, restoreAllowed, sameRevisionOrUnreadable, selectPublicRevision, STORE_OUTAGE, throwIfUncertain, toPublicDoc, trustPublicPointer, urlsToPrune, urlsToRetain, writeAfterReread } from "./cms-guard.ts";
 import { openJson, payloadSha, resealJson, sealJson, sealWithEditorPassword } from "./draft-seal.server.ts";
 import { normalizeEntry, plainText, slugify, uniqueSlug } from "./entries.ts";
 import { sitemapXml } from "./sitemap.ts";
@@ -159,6 +159,18 @@ test("dwa równoczesne zapisy i przerwany zapis", () => {
   assert.equal(second.ok, false);
   if (!second.ok) assert.match(second.message, /Odśwież stronę/);
   assert.equal(mem.publicBody, "nowe-publiczne");
+  const haltedPrivate = { lock: null as number | null, privateRev: 4, publicRev: 4, privateBody: "ok", publicBody: "ok" };
+  const privateHalt = memWrite(haltedPrivate, 4, "przerwane-prywatne", "niepublikowane", "private");
+  assert.equal(privateHalt.ok, false);
+  assert.equal(haltedPrivate.privateRev, 4);
+  assert.equal(haltedPrivate.privateBody, "ok");
+  assert.equal(haltedPrivate.publicBody, "ok");
+  const haltedPublic = { lock: null as number | null, privateRev: 4, publicRev: 4, privateBody: "ok", publicBody: "ok" };
+  const publicHalt = memWrite(haltedPublic, 4, "prywatne-nowe", "publiczne-przerwane", "public");
+  assert.equal(publicHalt.ok, false);
+  assert.equal(haltedPublic.privateBody, "prywatne-nowe");
+  assert.equal(haltedPublic.publicRev, 4);
+  assert.equal(haltedPublic.publicBody, "ok");
   const broken = memWrite(
     { lock: null, privateRev: 4, publicRev: 4, privateBody: "ok", publicBody: "ok" },
     4,
@@ -444,4 +456,124 @@ test("chwilowy błąd najnowszej wersji nie cofa zapisu do starszej", () => {
   ]);
   assert.equal(duringOutage.action, "stop");
   assert.equal(writeAfterReread(new Error(STORE_OUTAGE), null, editorHad), "stop");
+  assert.equal(writeAfterReread(null, 12, 10), "conflict");
+});
+
+test("dziennik 12 nie może wskazywać dokumentu 10 ani złej sumy", () => {
+  const sha12 = "ab".repeat(32);
+  const sha10 = "cd".repeat(32);
+  const other = "ef".repeat(32);
+  assert.equal(sha12.length, 64);
+  const good12 = {
+    isNewest: true,
+    journalRevision: 12,
+    pointerRevision: 12,
+    pointerUrl: "https://blob.example/doc-12",
+    pointerSha: sha12,
+    doc: { revision: 12, lead: "aktualna" },
+    docRevision: 12,
+    docSha: sha12,
+    error: null,
+  };
+  const accepted = journalStep(good12);
+  assert.equal(accepted.action, "use");
+  if (accepted.action === "use") assert.equal(accepted.value.revision, 12);
+  assert.equal(
+    judgeJournal({
+      journalRevision: 12,
+      pointerRevision: null,
+      pointerUrl: good12.pointerUrl,
+      pointerSha: sha12,
+      docRevision: 12,
+      docSha: sha12,
+    }),
+    "ok",
+  );
+  const mismatch = journalStep({
+    ...good12,
+    pointerUrl: "https://blob.example/doc-10",
+    pointerSha: sha10,
+    doc: { revision: 10, lead: "starsza" },
+    docRevision: 10,
+    docSha: sha10,
+  });
+  assert.equal(mismatch.action, "try-older");
+  assert.equal(
+    judgeJournal({
+      journalRevision: 12,
+      pointerRevision: 12,
+      pointerUrl: "https://blob.example/doc-12",
+      pointerSha: sha12,
+      docRevision: 12,
+      docSha: other,
+    }),
+    "damaged",
+  );
+  assert.equal(
+    judgeJournal({
+      journalRevision: 12,
+      pointerRevision: 10,
+      pointerUrl: "https://blob.example/doc-12",
+      pointerSha: sha12,
+      docRevision: 12,
+      docSha: sha12,
+    }),
+    "damaged",
+  );
+  const olderGood = journalStep({
+    isNewest: false,
+    journalRevision: 10,
+    pointerRevision: 10,
+    pointerUrl: "https://blob.example/doc-10",
+    pointerSha: sha10,
+    doc: { revision: 10, lead: "ostatnia dobra" },
+    docRevision: 10,
+    docSha: sha10,
+    error: null,
+  });
+  assert.equal(mismatch.action, "try-older");
+  assert.equal(olderGood.action, "use");
+  if (olderGood.action === "use") assert.equal(olderGood.value.lead, "ostatnia dobra");
+  const gap = journalStep(good12);
+  assert.equal(gap.action, "use");
+  assert.equal(selectPublicRevision([10, 12]), 12);
+  assert.equal(selectPublicRevision([10, 15, 12]), 15);
+  const down = journalStep({
+    ...good12,
+    doc: null,
+    docRevision: -1,
+    docSha: "",
+    error: new Error("Odczyt treści nie powiódł się (503)."),
+  });
+  assert.equal(down.action, "stop");
+  const missing = journalStep({
+    ...good12,
+    doc: null,
+    docRevision: -1,
+    docSha: "",
+    error: new Error("Odczyt treści nie powiódł się (404)."),
+  });
+  assert.equal(missing.action, "stop");
+  const network = journalStep({
+    ...good12,
+    doc: null,
+    docRevision: -1,
+    docSha: "",
+    error: new TypeError("fetch failed"),
+  });
+  assert.equal(network.action, "stop");
+  const noKey = journalStep({
+    ...good12,
+    doc: null,
+    docRevision: -1,
+    docSha: "",
+    error: new Error("Nie da się odczytać kopii. Brak klucza k1. Dopisz go do CMS_SEAL_KEYS. Dane nie zostały skasowane."),
+  });
+  assert.equal(noKey.action, "stop");
+  assert.equal(writeAfterReread(noKey.action === "stop" ? noKey.error : null, null, 12), "stop");
+  assert.deepEqual(publicReadCost(100), { listRequests: 1, documentRequests: 2 });
+  assert.deepEqual(publicReadCost(1000), { listRequests: 1, documentRequests: 2 });
+  assert.deepEqual(publicReadCost(10_000), { listRequests: 10, documentRequests: 2 });
+  assert.deepEqual(publicReadCost(1001), { listRequests: 2, documentRequests: 2 });
+  assert.deepEqual(publicReadCost(0), { listRequests: 0, documentRequests: 0 });
 });

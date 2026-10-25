@@ -14,6 +14,7 @@ import {
   throwIfUncertain,
   toPublicDoc,
   selectPublicRevision,
+  journalStep,
   urlsToPrune,
   writeAfterReread,
   lockDecision,
@@ -302,18 +303,80 @@ function highestRevision(blobs: BlobMeta[]) {
     .sort((a, b) => revisionFromPath(String(b.pathname)) - revisionFromPath(String(a.pathname)))[0];
 }
 
+type OpenedJournal = {
+  journalRevision: number;
+  pointerRevision: number | null;
+  pointerUrl: unknown;
+  pointerSha: unknown;
+  doc: SiteEdits | null;
+  docRevision: number;
+  docSha: string;
+  error: unknown | null;
+};
+
+function rejectedJournal(journalRevision: number, error: unknown): OpenedJournal {
+  return {
+    journalRevision,
+    pointerRevision: null,
+    pointerUrl: "",
+    pointerSha: "",
+    doc: null,
+    docRevision: -1,
+    docSha: "",
+    error,
+  };
+}
+
+/** Dziennik i dokument są sprawdzane razem. Sam adres nie wystarcza. */
+async function openJournalBlob(blob: BlobMeta): Promise<OpenedJournal> {
+  const journalRevision = revisionFromPath(String(blob.pathname));
+  try {
+    const opened = openJson(await fetchJson(readUrl(blob)));
+    if (!opened || typeof opened !== "object") return rejectedJournal(journalRevision, new Error("Kopia jest uszkodzona."));
+    const row = opened as { revision?: unknown; url?: unknown; sha?: unknown };
+    let pointerRevision: number | null = null;
+    if ("revision" in row && row.revision != null) {
+      pointerRevision = typeof row.revision === "number" ? row.revision : Number.NaN;
+    }
+    if (typeof row.url !== "string" || !row.url) {
+      return {
+        journalRevision,
+        pointerRevision,
+        pointerUrl: row.url,
+        pointerSha: row.sha,
+        doc: null,
+        docRevision: -1,
+        docSha: "",
+        error: new Error("Kopia jest uszkodzona."),
+      };
+    }
+    const doc = await fetchDoc(row.url);
+    return {
+      journalRevision,
+      pointerRevision,
+      pointerUrl: row.url,
+      pointerSha: row.sha,
+      doc,
+      docRevision: doc.revision,
+      docSha: payloadSha(canonicalEdits(doc)),
+      error: null,
+    };
+  } catch (error) {
+    return rejectedJournal(journalRevision, error);
+  }
+}
+
 async function readPointer(prefix: string): Promise<{ revision: number; url: string; sha: string } | null> {
   const latest = highestRevision(await blobList(prefix));
   if (!latest) return null;
-  const opened = openJson(await fetchJson(readUrl(latest)));
-  if (!opened || typeof opened !== "object") return null;
-  const pointer = opened as { url?: unknown; sha?: unknown };
-  if (typeof pointer.url !== "string" || !pointer.url) return null;
-  return {
-    revision: revisionFromPath(String(latest.pathname)),
-    url: pointer.url,
-    sha: typeof pointer.sha === "string" ? pointer.sha : "",
-  };
+  const opened = await openJournalBlob(latest);
+  const step = journalStep({ isNewest: true, ...opened });
+  if (step.action === "stop") {
+    throwIfUncertain(step.error);
+    throw new Error(STORE_OUTAGE);
+  }
+  if (step.action !== "use" || typeof opened.pointerUrl !== "string" || !opened.pointerUrl) return null;
+  return { revision: opened.journalRevision, url: opened.pointerUrl, sha: opened.docSha };
 }
 
 async function readAny(blobs: BlobMeta[]): Promise<{ doc: SiteEdits | null; saw: boolean }> {
@@ -355,16 +418,17 @@ async function loadPrivateFresh(): Promise<SiteEdits> {
   const journals = (await blobList(JOURNAL_PRIVATE))
     .filter((blob) => blob.pathname && isNumberedJournal(blob.pathname) && readUrl(blob))
     .sort((a, b) => revisionFromPath(String(b.pathname)) - revisionFromPath(String(a.pathname)));
+  const newest = selectPublicRevision(journals.map((blob) => revisionFromPath(String(blob.pathname))));
   for (const blob of journals) {
+    const revision = revisionFromPath(String(blob.pathname));
+    if (newest === null || revision > newest) continue;
     saw = true;
-    try {
-      const opened = openJson(await fetchJson(readUrl(blob)));
-      if (!opened || typeof opened !== "object") throw new Error("Kopia jest uszkodzona.");
-      const url = (opened as { url?: unknown }).url;
-      if (typeof url !== "string" || !url) throw new Error("Kopia jest uszkodzona.");
-      return await fetchDoc(url);
-    } catch (error) {
-      throwIfUncertain(error);
+    const opened = await openJournalBlob(blob);
+    const step = journalStep({ isNewest: revision === newest, ...opened });
+    if (step.action === "use") return step.value;
+    if (step.action === "stop") {
+      throwIfUncertain(step.error);
+      throw new Error(STORE_OUTAGE);
     }
   }
   const sorted = (await blobList(PRIVATE_DOCS))
@@ -411,14 +475,17 @@ async function loadPublic(): Promise<SiteEdits> {
       const revision = revisionFromPath(String(blob.pathname));
       if (newest === null || revision > newest) continue;
       try {
-        const pointer = (await fetchJson(readUrl(blob))) as { url?: string };
-        if (!pointer?.url) {
-          if (revision === newest) throw new Error("Kopia jest uszkodzona.");
-          continue;
+        const opened = await openJournalBlob(blob);
+        const step = journalStep({ isNewest: revision === newest, ...opened });
+        if (step.action === "use") {
+          const doc = toPublicDoc(step.value);
+          publicCache = { at: Date.now(), data: doc };
+          return doc;
         }
-        const doc = toPublicDoc(await fetchDoc(pointer.url));
-        publicCache = { at: Date.now(), data: doc };
-        return doc;
+        if (step.action === "stop") {
+          throwIfUncertain(step.error);
+          throw new Error(STORE_OUTAGE);
+        }
       } catch (error) {
         if (publicJournalFailure(revision === newest, error) === "stop") {
           throwIfUncertain(error);
@@ -735,9 +802,14 @@ export async function restorePrevious(expectedRevision: number) {
     .sort((a, b) => revisionFromPath(String(b.pathname)) - revisionFromPath(String(a.pathname)));
   const previous = journals[1];
   if (previous) {
-    const pointer = openJson(await fetchJson(readUrl(previous))) as { url?: string };
-    if (!pointer.url) throw new Error("Nie ma starszej kopii.");
-    const restored = await fetchDoc(pointer.url);
+    const opened = await openJournalBlob(previous);
+    const step = journalStep({ isNewest: true, ...opened });
+    if (step.action === "stop") {
+      throwIfUncertain(step.error);
+      throw new Error(STORE_OUTAGE);
+    }
+    if (step.action !== "use") throw new Error("Nie ma starszej kopii.");
+    const restored = step.value;
     restored.revision = current.revision;
     return { revision: await writeEdits(restored) };
   }
@@ -756,6 +828,7 @@ async function healPublic() {
   const pub = await readPointer(JOURNAL_PUBLIC);
   if (!priv || (pub && pub.revision >= priv.revision)) return;
   const doc = await fetchDoc(priv.url);
+  if (doc.revision !== priv.revision || payloadSha(canonicalEdits(doc)) !== priv.sha) return;
   const published = toPublicDoc(parseDoc(doc));
   const stamp = stamped(published);
   const saved = await blobPut(`${PUBLIC_DOCS}heal-${Date.now()}.json`, stamp.text, "application/json");

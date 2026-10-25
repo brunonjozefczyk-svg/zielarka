@@ -35,7 +35,7 @@ export const offers: Offer[] = [
     kicker: "Konsultacje",
     lead: "Indywidualna rozmowa o tym, co dzieje się w ciele i jak naturalne metody mogą Cię wesprzeć. Kliknij, żeby sprawdzić, czy mogę Ci pomóc.",
     href: "/konsultacje",
-    image: "/images/consult-table.jpg",
+    image: "/images/consult-table.webp",
     alt: "Stół konsultacji: dwa kubki naparu, notes i suszone zioła",
   },
   {
@@ -44,7 +44,7 @@ export const offers: Offer[] = [
     kicker: "Nauka przez praktykę",
     lead: "Chcesz wziąć udział w warsztatach lub spacerze zielarskim? Napisz do mnie, a powiem Ci, gdzie zaplanowane są najbliższe wydarzenia. A może chcesz, żebym przyjechała na wydarzenie organizowane przez Ciebie? Zapraszam do kontaktu.",
     href: "/warsztaty",
-    image: "/images/forest-walk.jpg",
+    image: "/images/forest-walk.webp",
     alt: "Koszyk z zebranymi ziołami na leśnej ścieżce",
   },
   {
@@ -53,7 +53,7 @@ export const offers: Offer[] = [
     kicker: "Wiedza w Twoim telefonie",
     lead: "Twoje miejsce w internecie, gdzie nauczysz się, jak korzystać z ziół. Znajdziesz tu ziołową wiedzę, spacery zielarskie i przepisy na ziołowe preparaty i potrawy. I to wszystko z moim wsparciem.",
     href: "/klub",
-    image: "/images/klub-phone.jpg",
+    image: "/images/klub-phone.webp",
     alt: "Telefon z wiedzą zielarską obok notesu i świeżej mięty",
   },
 ];

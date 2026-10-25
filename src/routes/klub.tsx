@@ -30,7 +30,7 @@ function ClubPage() {
       <div className="mx-auto grid max-w-6xl items-center gap-10 px-4 pb-20 sm:px-6 lg:grid-cols-2">
         <EditableImage
           id="img.klub"
-          src="/images/still-life.jpg"
+          src="/images/still-life.webp"
           alt="Suszone zioła na lnie"
           className="h-[420px] w-full rounded-lg object-cover"
         />

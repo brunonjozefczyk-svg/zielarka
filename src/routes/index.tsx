@@ -12,13 +12,21 @@ import { homeJsonLd, metaFor } from "@/lib/seo";
 import { JsonLd } from "@/components/JsonLd";
 
 export const Route = createFileRoute("/")({
-  head: () =>
-    metaFor({
+  head: () => {
+    const meta = metaFor({
       title: "Zielarka.pl — konsultacje zielarskie, warsztaty i Klub Zielarski",
       description:
         "Sabina Józefczyk, zielarka-fitoterapeutka z Krakowa. Konsultacje 1:1, warsztaty, spacery zielarskie i internetowy Klub Zielarski.",
       path: "/",
-    }),
+    });
+    return {
+      ...meta,
+      links: [
+        { rel: "preload", as: "image", href: "/images/hero-meadow.webp" },
+        ...meta.links,
+      ],
+    };
+  },
   component: Home,
 });
 
@@ -32,7 +40,7 @@ function Home() {
       <section className="relative min-h-[88vh] overflow-hidden">
         <EditableImage
           id="img.home.hero"
-          src="/images/hero-meadow.jpg"
+          src="/images/hero-meadow.webp"
           alt="Dzika łąka zielarska o świcie"
           wrapClassName="absolute inset-0 z-0"
           className="size-full object-cover"
@@ -103,9 +111,11 @@ function Home() {
         </div>
         <EditableImage
           id="img.home.paths.v2"
-          src="/images/three-paths.jpg"
+          src="/images/three-paths.webp"
           alt="Stara mapa leśnych dróg zbiegających się przy Zdrowiu"
           className="h-[420px] w-full rounded-lg object-cover object-center"
+          width={1600}
+          height={1200}
         />
       </section>
 
@@ -127,6 +137,8 @@ function Home() {
                     src={offer.image}
                     alt={offer.alt}
                     className="h-48 w-full object-cover"
+                    width={1600}
+                    height={1200}
                   />
                   <div className="flex flex-1 flex-col p-6">
                     <p className="text-xs uppercase tracking-[0.18em] text-clay">
@@ -174,10 +186,12 @@ function Home() {
       <section className="relative overflow-hidden">
         <EditableImage
           id="img.home.cta"
-          src="/images/forest-walk.jpg"
+          src="/images/forest-walk.webp"
           alt="Leśna ścieżka i koszyk ze zbiorem ziół"
           wrapClassName="absolute inset-0 z-0"
           className="size-full object-cover"
+          width={1600}
+          height={1067}
           scrim
           control="top"
         />

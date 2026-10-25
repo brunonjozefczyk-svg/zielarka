@@ -48,7 +48,7 @@ function ConsultPage() {
       <div className="mx-auto max-w-6xl px-4 pb-8 sm:px-6">
         <EditableImage
           id="img.consult"
-          src="/images/tea.jpg"
+          src="/images/tea.webp"
           alt="Napar ziołowy w ceramicznej filiżance"
           className="h-[380px] w-full rounded-lg object-cover"
         />

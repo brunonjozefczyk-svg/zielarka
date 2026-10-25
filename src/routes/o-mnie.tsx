@@ -30,7 +30,7 @@ function AboutPage() {
       <div className="mx-auto grid max-w-6xl gap-10 px-4 pb-20 sm:px-6 lg:grid-cols-2">
         <EditableImage
           id="img.about"
-          src="/images/workshop.jpg"
+          src="/images/workshop.webp"
           alt="Stół zielarski z słoikami i notatnikiem"
           className="h-[480px] w-full rounded-lg object-cover"
         />

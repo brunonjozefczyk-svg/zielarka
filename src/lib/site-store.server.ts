@@ -1,7 +1,20 @@
-import { timingSafeEqual } from "node:crypto";
+import { createHash, timingSafeEqual } from "node:crypto";
 import { herbs } from "./herbs";
 import { builtinSlugs, type ManagedEntry, normalizeEntry, parseStoredEntry, slugify } from "./entries";
-import { assertRevision, createAttemptLimiter, toPublicDoc, urlsToPrune, type StampBlob } from "./cms-guard";
+import {
+  assertRevision,
+  attemptBlocked,
+  createAttemptLimiter,
+  nextAttempt,
+  toPublicDoc,
+  urlsToPrune,
+  lockDecision,
+  publicFallback,
+  type AttemptRow,
+  type StampBlob,
+} from "./cms-guard";
+import { openJson, sealJson } from "./draft-seal.server";
+import { sanitizeStyle, sanitizeStyles, sanitizeTheme, type TextStyle, type ThemeSettings } from "./theme";
 
 export type SiteEdits = {
   revision: number;
@@ -9,6 +22,8 @@ export type SiteEdits = {
   images: Record<string, string>;
   herbs: Record<string, unknown>;
   entries: ManagedEntry[];
+  theme: ThemeSettings | null;
+  styles: Record<string, TextStyle>;
 };
 
 const DOC = "zielarka/content.json";
@@ -18,9 +33,11 @@ const PUBLIC_DOCS = "zielarka/public/";
 const PUBLIC_CACHE_MS = 30_000;
 const PRIVATE_KEEP = 8;
 const PUBLIC_KEEP = 3;
+const LOCKS = "zielarka/locks/";
+const AUTH = "zielarka/auth/";
 
 function empty(): SiteEdits {
-  return { revision: 0, copy: {}, images: {}, herbs: {}, entries: [] };
+  return { revision: 0, copy: {}, images: {}, herbs: {}, entries: [], theme: null, styles: {} };
 }
 
 let publicCache: { at: number; data: SiteEdits } | null = null;
@@ -38,14 +55,31 @@ export function passwordOk(given: string) {
   return timingSafeEqual(a, b);
 }
 
-const attempts = createAttemptLimiter();
+const memoryAttempts = createAttemptLimiter();
 
-export function editorGate(password: string, key: string) {
-  if (attempts.blocked(key || "local")) {
+export async function editorGate(password: string, key: string) {
+  const id = createHash("sha256").update(key || "local").digest("hex").slice(0, 20);
+  if (memoryAttempts.blocked(id)) {
+    return { ok: false as const, message: "Za dużo prób. Spróbuj za kwadrans." };
+  }
+  let row: AttemptRow | null = null;
+  try {
+    row = await readAttempt(id);
+  } catch {
+    row = null;
+  }
+  if (attemptBlocked(row)) {
+    memoryAttempts.note(id, false);
     return { ok: false as const, message: "Za dużo prób. Spróbuj za kwadrans." };
   }
   const ok = passwordOk(password);
-  attempts.note(key || "local", ok);
+  memoryAttempts.note(id, ok);
+  const next = nextAttempt(row, ok);
+  try {
+    await writeAttempt(id, next);
+  } catch {
+    // Licznik w pamięci tej instancji zostaje.
+  }
   if (!ok) return { ok: false as const, message: "Złe hasło." };
   return { ok: true as const, message: "" };
 }
@@ -72,6 +106,29 @@ async function blobPut(pathname: string, body: BodyInit, contentType: string) {
     throw new Error(`Zapis nie powiódł się (${res.status}).`);
   }
   return (await res.json()) as { url: string; downloadUrl?: string };
+}
+
+async function blobCreate(pathname: string, body: string) {
+  const key = token();
+  if (!key) throw new Error("Brak magazynu treści.");
+  const url = `https://vercel.com/api/blob/?${new URLSearchParams({ pathname })}`;
+  const res = await fetch(url, {
+    method: "PUT",
+    headers: {
+      authorization: `Bearer ${key}`,
+      "x-api-version": BLOB_API,
+      "x-content-type": "application/json",
+      "x-add-random-suffix": "0",
+      "x-allow-overwrite": "0",
+      "x-cache-control-max-age": "60",
+    },
+    body,
+  });
+  if (res.ok) {
+    const data = (await res.json()) as { url?: string };
+    return { status: res.status, body: "", url: data.url ?? "" };
+  }
+  return { status: res.status, body: await res.text(), url: "" };
 }
 
 type BlobMeta = { url?: string; downloadUrl?: string; pathname?: string; uploadedAt?: string | number };
@@ -143,13 +200,15 @@ function parseDoc(data: Partial<SiteEdits> & { revision?: unknown }): SiteEdits 
           return entry ? [entry] : [];
         })
       : [],
+    theme: sanitizeTheme(data.theme),
+    styles: sanitizeStyles(data.styles),
   };
 }
 
 async function fetchDoc(url: string) {
   const res = await fetch(url, { cache: "no-store" });
   if (!res.ok) throw new Error(`Odczyt treści nie powiódł się (${res.status}).`);
-  return parseDoc((await res.json()) as Partial<SiteEdits>);
+  return parseDoc(openJson(await res.json()) as Partial<SiteEdits>);
 }
 
 async function loadLegacy(): Promise<SiteEdits | null> {
@@ -186,6 +245,8 @@ function clone(doc: SiteEdits): SiteEdits {
     images: { ...doc.images },
     herbs: { ...doc.herbs },
     entries: doc.entries.map((entry) => ({ ...entry })),
+    theme: doc.theme ? { ...doc.theme } : null,
+    styles: { ...doc.styles },
   };
 }
 
@@ -193,9 +254,9 @@ export async function readPublicEdits(): Promise<SiteEdits> {
   if (!token()) return empty();
   try {
     return await loadPublic();
-  } catch {
+  } catch (error) {
     console.error("Nie udało się odczytać treści strony.");
-    return publicCache?.data ?? empty();
+    return publicFallback(publicCache?.data ?? null, error);
   }
 }
 
@@ -214,28 +275,84 @@ async function prune(prefix: string, keep: number, writtenPath: string) {
   await blobDelete(urlsToPrune(stamps, keep, writtenPath));
 }
 
+async function lockAge(pathname: string) {
+  const blobs = await blobList(LOCKS);
+  const lock = blobs.find((blob) => blob.pathname === pathname);
+  const url = lock ? readUrl(lock) : "";
+  if (!url) return null;
+  try {
+    const res = await fetch(url, { cache: "no-store" });
+    if (!res.ok) return 0;
+    const stamp = Number(await res.text());
+    if (!Number.isFinite(stamp)) return 0;
+    return Math.max(0, Date.now() - stamp);
+  } catch {
+    return 0;
+  }
+}
+
+async function claimLock(revision: number) {
+  const lockPath = `${LOCKS}${revision}.lock`;
+  const first = await blobCreate(lockPath, String(Date.now()));
+  if (lockDecision(first.status, first.body, 0) === "claimed" && first.url) return first.url;
+  const decision = lockDecision(first.status, first.body, await lockAge(lockPath));
+  if (decision === "fail") throw new Error(`Zapis nie powiódł się (${first.status}).`);
+  if (decision === "busy") throw new Error("Ktoś zapisał w międzyczasie. Odśwież stronę.");
+  const blobs = await blobList(LOCKS);
+  const existing = blobs.find((blob) => blob.pathname === lockPath);
+  if (existing?.url) await blobDelete([existing.url]);
+  const second = await blobCreate(lockPath, String(Date.now()));
+  if (second.status >= 200 && second.status < 300 && second.url) return second.url;
+  throw new Error("Ktoś zapisał w międzyczasie. Odśwież stronę.");
+}
+
 async function writeEdits(doc: SiteEdits) {
+  const lockPath = `${LOCKS}${doc.revision}.lock`;
+  const lockUrl = await claimLock(doc.revision);
   const next: SiteEdits = { ...doc, revision: doc.revision + 1 };
   const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const privatePath = `${PRIVATE_DOCS}${id}.json`;
   const publicPath = `${PUBLIC_DOCS}${id}.json`;
-  await blobPut(privatePath, JSON.stringify(next), "application/json");
-  const published = toPublicDoc(next);
-  await blobPut(publicPath, JSON.stringify(published), "application/json");
-  publicCache = { at: Date.now(), data: published };
+  try {
+    await blobPut(privatePath, sealJson(JSON.stringify(next)), "application/json");
+    const published = toPublicDoc(next);
+    await blobPut(publicPath, JSON.stringify(published), "application/json");
+    publicCache = { at: Date.now(), data: published };
+  } catch (error) {
+    if (lockUrl) await blobDelete([lockUrl]);
+    throw error;
+  }
   try {
     await prune(PRIVATE_DOCS, PRIVATE_KEEP, privatePath);
     await prune(PUBLIC_DOCS, PUBLIC_KEEP, publicPath);
+    await prune(LOCKS, 40, lockPath);
   } catch {
     // Starsze kopie zostają. Bieżący zapis już jest.
   }
   return next.revision;
 }
 
-export async function saveCopy(id: string, value: string, expectedRevision: number) {
+export async function saveCopy(
+  id: string,
+  value: string,
+  expectedRevision: number,
+  style: unknown = undefined,
+) {
   const doc = await readForWrite();
   assertRevision(doc.revision, expectedRevision);
   doc.copy[id] = value;
+  if (style !== undefined) {
+    const clean = sanitizeStyle(style);
+    if (clean) doc.styles[id] = clean;
+    else delete doc.styles[id];
+  }
+  return writeEdits(doc);
+}
+
+export async function saveTheme(theme: unknown, expectedRevision: number) {
+  const doc = await readForWrite();
+  assertRevision(doc.revision, expectedRevision);
+  doc.theme = sanitizeTheme(theme);
   return writeEdits(doc);
 }
 
@@ -360,6 +477,26 @@ export async function readEditorDoc() {
 
 export function publishedHerbs(doc: SiteEdits) {
   return doc.entries.filter((entry) => entry.status === "published");
+}
+
+async function readAttempt(id: string): Promise<AttemptRow | null> {
+  const latest = newest(await blobList(`${AUTH}${id}/`));
+  if (!latest) return null;
+  const res = await fetch(readUrl(latest), { cache: "no-store" });
+  if (!res.ok) return null;
+  const data = (await res.json()) as Partial<AttemptRow>;
+  if (typeof data.count !== "number" || typeof data.until !== "number") return null;
+  return { count: data.count, until: data.until };
+}
+
+async function writeAttempt(id: string, row: AttemptRow) {
+  const pathname = `${AUTH}${id}/${Date.now()}.json`;
+  await blobPut(pathname, JSON.stringify(row), "application/json");
+  try {
+    await prune(`${AUTH}${id}/`, 1, pathname);
+  } catch {
+    // Licznik jest już zapisany.
+  }
 }
 
 export { herbs };

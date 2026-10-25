@@ -1,6 +1,8 @@
 import { createServerFn } from "@tanstack/react-start";
+import { herbOutageAction } from "./cms-guard";
 import type { ManagedEntry } from "./entries";
 import type { HerbCopy } from "./herb-editor";
+import type { TextStyle, ThemeSettings } from "./theme";
 
 export type SiteEdits = {
   revision: number;
@@ -8,9 +10,19 @@ export type SiteEdits = {
   images: Record<string, string>;
   herbs: Record<string, HerbCopy>;
   entries: ManagedEntry[];
+  theme: ThemeSettings | null;
+  styles: Record<string, TextStyle>;
 };
 
-const empty = (): SiteEdits => ({ revision: 0, copy: {}, images: {}, herbs: {}, entries: [] });
+const empty = (): SiteEdits => ({
+  revision: 0,
+  copy: {},
+  images: {},
+  herbs: {},
+  entries: [],
+  theme: null,
+  styles: {},
+});
 
 async function gate(password: string) {
   const { editorGate } = await import("./site-store.server");
@@ -27,6 +39,8 @@ export const loadSiteEdits = createServerFn({ method: "GET" }).handler(async () 
     images: doc.images,
     herbs: doc.herbs as Record<string, HerbCopy>,
     entries: doc.entries,
+    theme: doc.theme,
+    styles: doc.styles,
   };
 });
 
@@ -36,7 +50,20 @@ export const loadHerbPage = createServerFn({ method: "GET" })
     const { readPublicEdits } = await import("./site-store.server");
     const { entryToHerb } = await import("./entries");
     const { getHerb, herbs } = await import("./herbs");
-    const edits = await readPublicEdits();
+    let edits;
+    try {
+      edits = await readPublicEdits();
+    } catch {
+      if (herbOutageAction(Boolean(getHerb(data.slug))) === "unavailable") {
+        throw new Error("Magazyn treści jest chwilowo niedostępny.");
+      }
+      const builtin = getHerb(data.slug);
+      if (!builtin) throw new Error("Magazyn treści jest chwilowo niedostępny.");
+      const related = builtin.related
+        .map((slug) => herbs.find((item) => item.slug === slug))
+        .filter((item): item is NonNullable<typeof item> => Boolean(item));
+      return { herb: builtin, related };
+    }
     const builtin = getHerb(data.slug);
     let herb = builtin;
     if (builtin) {
@@ -78,19 +105,25 @@ export const checkEditorPassword = createServerFn({ method: "POST" })
   });
 
 export const saveSiteCopyFn = createServerFn({ method: "POST" })
-  .validator((data: { password: string; id: string; value: string; revision: number }) => {
+  .validator((data: { password: string; id: string; value: string; revision: number; style?: unknown }) => {
     const id = data.id?.trim() ?? "";
     const value = data.value ?? "";
     if (!id || id.length > 120 || value.length > 20000) {
       throw new Error("Za długi tekst.");
     }
-    return { password: data.password ?? "", id, value, revision: Number(data.revision) };
+    return {
+      password: data.password ?? "",
+      id,
+      value,
+      revision: Number(data.revision),
+      style: data.style,
+    };
   })
   .handler(async ({ data }) => {
     const result = await gate(data.password);
     if (!result.ok) return { ok: false as const, revision: data.revision, message: result.message };
     const { saveCopy } = await import("./site-store.server");
-    const revision = await saveCopy(data.id, data.value, data.revision);
+    const revision = await saveCopy(data.id, data.value, data.revision, data.style);
     return { ok: true as const, revision, message: "" };
   });
 
@@ -155,6 +188,20 @@ export const saveEntryFn = createServerFn({ method: "POST" })
     const { saveEntry } = await import("./site-store.server");
     const saved = await saveEntry(data.entry, data.previousSlug || undefined, data.revision);
     return { ok: true as const, entry: saved.entry, revision: saved.revision, message: "" };
+  });
+
+export const saveThemeFn = createServerFn({ method: "POST" })
+  .validator((data: { password: string; theme: unknown; revision: number }) => ({
+    password: data.password ?? "",
+    theme: data.theme ?? null,
+    revision: Number(data.revision),
+  }))
+  .handler(async ({ data }) => {
+    const result = await gate(data.password);
+    if (!result.ok) return { ok: false as const, revision: data.revision, message: result.message };
+    const { saveTheme } = await import("./site-store.server");
+    const revision = await saveTheme(data.theme, data.revision);
+    return { ok: true as const, revision, message: "" };
   });
 
 export const deleteEntryFn = createServerFn({ method: "POST" })

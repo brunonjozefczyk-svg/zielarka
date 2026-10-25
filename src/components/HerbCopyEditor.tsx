@@ -55,15 +55,23 @@ export function HerbCopyEditor({ herb }: { herb: Herb }) {
         toast.success("Zapisane. Widać to też na innych telefonach.");
         setOpen(false);
       })
-      .catch(() => toast.error("Nie udało się zapisać. Sprawdź hasło i sieć."));
+      .catch((error: unknown) => {
+        const text = error instanceof Error ? error.message : "";
+        toast.error(text && text.length < 180 ? text : "Nie udało się zapisać. Sprawdź hasło i sieć.");
+      });
   }
 
   function revert() {
-    void resetHerbCopy(herb.slug).then(() => {
-      setDraft(copyFromHerb(herb));
-      toast.success("Wraca oryginalny opis.");
-      setOpen(false);
-    });
+    void resetHerbCopy(herb.slug)
+      .then(() => {
+        setDraft(copyFromHerb(herb));
+        toast.success("Wraca oryginalny opis.");
+        setOpen(false);
+      })
+      .catch((error: unknown) => {
+        const text = error instanceof Error ? error.message : "";
+        toast.error(text && text.length < 180 ? text : "Nie udało się przywrócić opisu.");
+      });
   }
 
   return (

@@ -2,6 +2,7 @@ import { createRootRoute, HeadContent, Outlet, Scripts } from "@tanstack/react-r
 import { AuthProvider } from "@/lib/auth/provider";
 import { PreviewHostBridge } from "@/components/preview-host-bridge";
 import { EditsProvider, type PublicEdits } from "@/lib/edits-context";
+import { themeAttrs, themeVars } from "@/lib/theme";
 import { Toaster } from "sonner";
 import appCss from "../styles.css?url";
 
@@ -11,8 +12,14 @@ const DESCRIPTION =
 
 export const Route = createRootRoute({
   loader: async (): Promise<{ edits: PublicEdits }> => {
-    const { loadSiteEdits } = await import("@/lib/site-api");
-    return { edits: await loadSiteEdits() };
+    try {
+      const { loadSiteEdits } = await import("@/lib/site-api");
+      return { edits: await loadSiteEdits() };
+    } catch {
+      return {
+        edits: { revision: 0, copy: {}, images: {}, herbs: {}, entries: [], theme: null, styles: {}, storeOk: false },
+      };
+    }
   },
   head: () => ({
     meta: [
@@ -39,7 +46,13 @@ export const Route = createRootRoute({
   component: function Root() {
     const { edits } = Route.useLoaderData();
     return (
-    <html lang="pl" className="antialiased" suppressHydrationWarning>
+    <html
+      lang="pl"
+      className="antialiased"
+      {...themeAttrs(edits.theme)}
+      style={themeVars(edits.theme)}
+      suppressHydrationWarning
+    >
       <head>
         <HeadContent />
       </head>

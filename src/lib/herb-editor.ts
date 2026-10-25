@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { herbs, type Herb, type HerbFaq } from "./herbs";
 import { entryToHerb } from "./entries";
 import { useEdits } from "./edits-context";
@@ -69,9 +69,6 @@ export function applyRemoteHerbs(herbsCopy: Record<string, HerbCopy>) {
 }
 
 export async function saveHerbCopy(slug: string, copy: HerbCopy) {
-  const all = readAll();
-  all[slug] = copy;
-  writeAll(all);
   const { readEditorPassword, editorRevision, setEditorRevision } = await import("./site-editor");
   const password = readEditorPassword();
   if (!password) throw new Error("brak hasła");
@@ -79,6 +76,9 @@ export async function saveHerbCopy(slug: string, copy: HerbCopy) {
   const result = await saveHerbFn({ data: { password, slug, copy, revision: editorRevision() } });
   if (!result.ok) throw new Error(result.message || "odmowa");
   setEditorRevision(result.revision);
+  const all = readAll();
+  all[slug] = copy;
+  writeAll(all);
 }
 
 export function mergeHerb(herb: Herb): Herb {
@@ -88,15 +88,16 @@ export function mergeHerb(herb: Herb): Herb {
 }
 
 export async function resetHerbCopy(slug: string) {
+  const { readEditorPassword, editorRevision, setEditorRevision } = await import("./site-editor");
+  const password = readEditorPassword();
+  if (!password) throw new Error("brak hasła");
+  const { saveHerbFn } = await import("./site-api");
+  const result = await saveHerbFn({ data: { password, slug, copy: null, revision: editorRevision() } });
+  if (!result.ok) throw new Error(result.message || "odmowa");
+  setEditorRevision(result.revision);
   const all = readAll();
   delete all[slug];
   writeAll(all);
-  const { readEditorPassword, editorRevision, setEditorRevision } = await import("./site-editor");
-  const password = readEditorPassword();
-  if (!password) return;
-  const { saveHerbFn } = await import("./site-api");
-  const result = await saveHerbFn({ data: { password, slug, copy: null, revision: editorRevision() } });
-  if (result.ok) setEditorRevision(result.revision);
 }
 
 export function hasHerbCopy(slug: string) {
@@ -117,11 +118,16 @@ export function exportHerbCopy(slug: string, copy: HerbCopy) {
 
 export function useMergedHerb(herb: Herb) {
   const edits = useEdits();
-  const remote = overlayHerb(herb, edits.herbs[herb.slug], edits.images[`img.herb.${herb.slug}`]);
-  const [live, setLive] = useState(remote);
+  const copy = edits.herbs[herb.slug];
+  const image = edits.images[`img.herb.${herb.slug}`];
+  const [live, setLive] = useState(false);
+  const [tick, setTick] = useState(0);
 
   useEffect(() => {
-    const apply = () => setLive(readEditMode() ? mergeHerb(remote) : remote);
+    const apply = () => {
+      setLive(readEditMode());
+      setTick((value) => value + 1);
+    };
     apply();
     window.addEventListener("zielarka-herb-copy", apply);
     window.addEventListener("storage", apply);
@@ -131,9 +137,12 @@ export function useMergedHerb(herb: Herb) {
       window.removeEventListener("storage", apply);
       window.removeEventListener("zielarka-site-editor", apply);
     };
-  }, [remote]);
+  }, []);
 
-  return live;
+  return useMemo(() => {
+    const over = overlayHerb(herb, copy, image);
+    return live ? mergeHerb(over) : over;
+  }, [herb, copy, image, live, tick]);
 }
 
 function overlayHerb(herb: Herb, remote: unknown, image?: string): Herb {
@@ -153,19 +162,14 @@ function overlayHerb(herb: Herb, remote: unknown, image?: string): Herb {
 
 export function useMergedHerbs() {
   const edits = useEdits();
-  const serverList = herbs.map((herb) =>
-    overlayHerb(herb, edits.herbs[herb.slug], edits.images[`img.herb.${herb.slug}`]),
-  );
-  const [list, setList] = useState(serverList);
+  const [live, setLive] = useState(false);
+  const [tick, setTick] = useState(0);
 
   useEffect(() => {
-    const apply = () =>
-      setList(
-        herbs.map((herb) => {
-          const over = overlayHerb(herb, edits.herbs[herb.slug], edits.images[`img.herb.${herb.slug}`]);
-          return readEditMode() ? mergeHerb(over) : over;
-        }),
-      );
+    const apply = () => {
+      setLive(readEditMode());
+      setTick((value) => value + 1);
+    };
     apply();
     window.addEventListener("zielarka-herb-copy", apply);
     window.addEventListener("storage", apply);
@@ -175,9 +179,16 @@ export function useMergedHerbs() {
       window.removeEventListener("storage", apply);
       window.removeEventListener("zielarka-site-editor", apply);
     };
-  }, [edits]);
+  }, []);
 
-  return list;
+  return useMemo(
+    () =>
+      herbs.map((herb) => {
+        const over = overlayHerb(herb, edits.herbs[herb.slug], edits.images[`img.herb.${herb.slug}`]);
+        return live ? mergeHerb(over) : over;
+      }),
+    [edits, live, tick],
+  );
 }
 
 export function useAllHerbs() {

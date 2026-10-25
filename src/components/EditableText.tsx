@@ -1,11 +1,27 @@
-import { useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { toast } from "sonner";
-import { Button } from "@/components/ui/button";
-import { Textarea } from "@/components/ui/textarea";
-import { getCopy, saveCopy, useCopy, useEditMode } from "@/lib/site-editor";
+import { useEdits } from "@/lib/edits-context";
+import { getCopy, notedTextStyle, saveCopy, useCopy, useEditMode } from "@/lib/site-editor";
+import { textInline, type TextStyle } from "@/lib/theme";
 import { cn } from "@/lib/utils";
 
+const TextFormatDialog = lazy(() =>
+  import("@/components/TextFormatDialog").then((mod) => ({ default: mod.TextFormatDialog })),
+);
+
 type Tag = "p" | "h1" | "h2" | "h3" | "span";
+
+function useTextStyle(id: string) {
+  const saved = useEdits().styles?.[id] ?? null;
+  const [noted, setNoted] = useState<TextStyle | null | undefined>(undefined);
+  useEffect(() => {
+    const apply = () => setNoted(notedTextStyle(id));
+    apply();
+    window.addEventListener("zielarka-site-editor", apply);
+    return () => window.removeEventListener("zielarka-site-editor", apply);
+  }, [id]);
+  return noted === undefined ? saved : noted;
+}
 
 export function EditableText({
   id,
@@ -20,77 +36,63 @@ export function EditableText({
 }) {
   const { editing } = useEditMode();
   const value = useCopy(id, defaultValue);
+  const style = useTextStyle(id);
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState(value);
+  const [draftStyle, setDraftStyle] = useState<TextStyle | null>(style);
   const Tag = as;
+  const inline = textInline(style);
 
   if (!editing) {
-    return <Tag className={className}>{value}</Tag>;
+    return (
+      <Tag className={className} style={inline}>
+        {value}
+      </Tag>
+    );
   }
 
   return (
     <>
       <button
         type="button"
-        className={cn(
-          "w-full rounded-sm text-left outline-2 outline-dashed outline-clay/80",
-          className,
-        )}
-        onClick={(e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          setDraft(getCopy(id, defaultValue));
+        className={cn("w-full rounded-sm text-left outline-2 outline-dashed outline-clay/80", className)}
+        style={inline}
+        onClick={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          setDraft(getCopy(id, value));
+          setDraftStyle(style);
           setOpen(true);
         }}
       >
         {value}
       </button>
       {open ? (
-        <div
-          className="fixed inset-0 z-[60] bg-ink/40"
-          onClick={() => setOpen(false)}
-        >
-          <div
-            className="absolute inset-x-0 bottom-0 max-h-[85vh] overflow-auto rounded-t-lg bg-paper p-5"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <p className="text-xs uppercase tracking-[0.16em] text-clay">Edycja tekstu</p>
-            <Textarea
-              className="mt-3 min-h-40"
-              value={draft}
-              onChange={(e) => setDraft(e.target.value)}
-              autoFocus
-            />
-            <div className="mt-4 flex flex-wrap gap-3">
-              <Button
-                type="button"
-                onClick={() => {
-                  const next = draft.trim();
-                  if (!next) {
-                    toast.error("Tekst nie może być pusty.");
-                    return;
-                  }
-                  void saveCopy(id, next)
-                    .then(() => {
-                      setOpen(false);
-                      toast.success("Zapisane. Widać to też na innych telefonach.");
-                    })
-                    .catch((error: unknown) => {
-                      const text = error instanceof Error ? error.message : "";
-                      toast.error(
-                        text && text.length < 180 ? text : "Nie udało się zapisać. Sprawdź hasło i sieć.",
-                      );
-                    });
-                }}
-              >
-                Zapisz
-              </Button>
-              <Button type="button" variant="outline" onClick={() => setOpen(false)}>
-                Anuluj
-              </Button>
-            </div>
-          </div>
-        </div>
+        <Suspense fallback={null}>
+          <TextFormatDialog
+            draft={draft}
+            draftStyle={draftStyle}
+            onDraft={setDraft}
+            onStyle={setDraftStyle}
+            onClose={() => setOpen(false)}
+            onSave={() => {
+              const next = draft.trim();
+              if (!next) {
+                toast.error("Tekst nie może być pusty.");
+                return;
+              }
+              void saveCopy(id, next, draftStyle)
+                .then(() => {
+                  setOpen(false);
+                  toast.success("Zapisane. Widać to też na innych telefonach.");
+                })
+                .catch((error: unknown) => {
+                  const text = error instanceof Error ? error.message : "";
+                  toast.error(text && text.length < 180 ? text : "Nie udało się zapisać. Sprawdź hasło i sieć.");
+                });
+            }}
+          />
+        </Suspense>
       ) : null}
     </>
   );

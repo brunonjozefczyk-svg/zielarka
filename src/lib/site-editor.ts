@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { useEdits } from "./edits-context";
 
+import type { TextStyle } from "./theme";
+
 const COPY_KEY = "zielarka.site-copy.v3";
 const MODE_KEY = "zielarka.edit-mode";
 const EVENT = "zielarka-site-editor";
@@ -45,19 +47,30 @@ export function clearEditorPassword() {
   writeEditMode(false);
 }
 
-export async function saveCopy(id: string, value: string) {
-  const all = readCopy();
-  all[id] = value;
-  localStorage.setItem(COPY_KEY, JSON.stringify(all));
+const styleNotes = new Map<string, TextStyle | null>();
+
+export function noteTextStyle(id: string, style: TextStyle | null) {
+  styleNotes.set(id, style);
   emit();
+}
+
+export function notedTextStyle(id: string): TextStyle | null | undefined {
+  return styleNotes.has(id) ? styleNotes.get(id) : undefined;
+}
+
+export async function saveCopy(id: string, value: string, style: TextStyle | null = null) {
   const password = readEditorPassword();
   if (!password) throw new Error("brak hasła");
   const { saveSiteCopyFn } = await import("./site-api");
   const result = await saveSiteCopyFn({
-    data: { password, id, value, revision: editorRevision() },
+    data: { password, id, value, revision: editorRevision(), style },
   });
   if (!result.ok) throw new Error(result.message || "odmowa");
   setEditorRevision(result.revision);
+  const all = readCopy();
+  all[id] = value;
+  localStorage.setItem(COPY_KEY, JSON.stringify(all));
+  noteTextStyle(id, style);
 }
 
 export function getCopy(id: string, fallback: string) {
@@ -98,13 +111,6 @@ export async function getImage(id: string): Promise<string | null> {
 }
 
 export async function saveImage(id: string, dataUrl: string) {
-  const db = await openDb();
-  await new Promise<void>((resolve, reject) => {
-    const req = db.transaction(STORE, "readwrite").objectStore(STORE).put(dataUrl, id);
-    req.onsuccess = () => resolve();
-    req.onerror = () => reject(req.error);
-  });
-  emit();
   const password = readEditorPassword();
   if (!password) throw new Error("brak hasła");
   const { saveSiteImageFn } = await import("./site-api");
@@ -113,14 +119,14 @@ export async function saveImage(id: string, dataUrl: string) {
   });
   if (!result.ok) throw new Error(result.message || "odmowa");
   setEditorRevision(result.revision);
-  if (result.url) {
-    await new Promise<void>((resolve, reject) => {
-      const req = db.transaction(STORE, "readwrite").objectStore(STORE).put(result.url, id);
-      req.onsuccess = () => resolve();
-      req.onerror = () => reject(req.error);
-    });
-    emit();
-  }
+  if (!result.url) return;
+  const db = await openDb();
+  await new Promise<void>((resolve, reject) => {
+    const req = db.transaction(STORE, "readwrite").objectStore(STORE).put(result.url, id);
+    req.onsuccess = () => resolve();
+    req.onerror = () => reject(req.error);
+  });
+  emit();
 }
 
 export function adoptServerCopy(copy: Record<string, string>) {

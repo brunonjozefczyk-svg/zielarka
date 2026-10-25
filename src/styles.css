@@ -56,6 +56,40 @@
   }
 }
 
+html[data-theme="custom"] {
+  --font-display: var(--zl-display);
+  --font-sans: var(--zl-body);
+}
+
+html[data-size-body] body {
+  font-size: var(--zl-body-size);
+}
+
+html[data-w-body] body {
+  font-weight: var(--zl-body-weight);
+}
+
+html[data-leading] body {
+  line-height: var(--zl-leading);
+}
+
+html[data-size-h1] h1 {
+  font-size: var(--zl-h1);
+  line-height: 1.05;
+}
+
+html[data-size-h2] h2 {
+  font-size: var(--zl-h2);
+}
+
+html[data-size-h3] h3 {
+  font-size: var(--zl-h3);
+}
+
+html[data-w-heading] :is(h1, h2, h3) {
+  font-weight: var(--zl-heading-weight);
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

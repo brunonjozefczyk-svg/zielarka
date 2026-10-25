@@ -285,6 +285,46 @@ export const cronBackup = async (authorization: string) => {
   return { ok: true as const, status: 200, at: saved.at };
 };
 
+const STAT_SECTIONS = new Set(["overview", "organic", "pages", "sources", "seo", "conversions", "page"]);
+const STAT_RANGES = new Set(["today", "7", "30", "90", "custom"]);
+const STAT_DEVICES = new Set(["", "desktop", "mobile", "tablet"]);
+
+export const statsReportFn = createServerFn({ method: "POST" })
+  .validator((data: {
+    password?: string;
+    section?: string;
+    range?: string;
+    start?: string;
+    end?: string;
+    page?: string;
+    device?: string;
+    country?: string;
+  }) => ({
+    password: data.password ?? "",
+    section: STAT_SECTIONS.has(data.section ?? "") ? (data.section as "overview") : "overview",
+    range: STAT_RANGES.has(data.range ?? "") ? (data.range as "30") : "30",
+    start: (data.start ?? "").slice(0, 10),
+    end: (data.end ?? "").slice(0, 10),
+    page: (data.page ?? "").trim().slice(0, 180),
+    device: STAT_DEVICES.has(data.device ?? "") ? (data.device ?? "") : "",
+    country: (data.country ?? "").trim().toLowerCase().slice(0, 8),
+  }))
+  .handler(async ({ data }) => {
+    const result = await gate(data.password);
+    if (!result.ok) return { ok: false as const, report: null, message: result.message };
+    const { loadStats } = await import("./analytics.server");
+    const report = await loadStats({
+      section: data.section,
+      range: data.range,
+      start: data.start,
+      end: data.end,
+      page: data.page,
+      device: data.device,
+      country: data.country,
+    });
+    return { ok: true as const, report, message: "" };
+  });
+
 export { empty };
 
 const CONTACT_TOPICS = new Set(["konsultacja", "warsztat", "spacer", "klub", "inne"]);

@@ -1,3 +1,4 @@
+import { useEffect, useState, type ComponentType } from "react";
 import { createRootRoute, HeadContent, Outlet, Scripts } from "@tanstack/react-router";
 import { AuthProvider } from "@/lib/auth/provider";
 import { PreviewHostBridge } from "@/components/preview-host-bridge";
@@ -63,6 +64,7 @@ export const Route = createRootRoute({
             <Outlet />
           </AuthProvider>
         </EditsProvider>
+        <AnalyticsSlot />
         <Toaster
           position="bottom-center"
           toastOptions={{
@@ -76,3 +78,20 @@ export const Route = createRootRoute({
     );
   },
 });
+
+function AnalyticsSlot() {
+  const measurementId = import.meta.env.VITE_GA_MEASUREMENT_ID as string | undefined;
+  const [View, setView] = useState<ComponentType<{ measurementId: string }> | null>(null);
+  useEffect(() => {
+    if (!measurementId || !/^G-[A-Za-z0-9]+$/.test(measurementId)) return;
+    let live = true;
+    void import("@/components/AnalyticsConsent").then((mod) => {
+      if (live) setView(() => mod.AnalyticsConsent);
+    });
+    return () => {
+      live = false;
+    };
+  }, [measurementId]);
+  if (!measurementId || !View) return null;
+  return <View measurementId={measurementId} />;
+}

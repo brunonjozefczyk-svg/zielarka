@@ -3,18 +3,26 @@ import type { ManagedEntry } from "./entries";
 import type { HerbCopy } from "./herb-editor";
 
 export type SiteEdits = {
+  revision: number;
   copy: Record<string, string>;
   images: Record<string, string>;
   herbs: Record<string, HerbCopy>;
   entries: ManagedEntry[];
 };
 
-const empty = (): SiteEdits => ({ copy: {}, images: {}, herbs: {}, entries: [] });
+const empty = (): SiteEdits => ({ revision: 0, copy: {}, images: {}, herbs: {}, entries: [] });
+
+async function gate(password: string) {
+  const { editorGate } = await import("./site-store.server");
+  const { editorClientKey } = await import("./client-key.server");
+  return editorGate(password, editorClientKey());
+}
 
 export const loadSiteEdits = createServerFn({ method: "GET" }).handler(async () => {
   const { readPublicEdits } = await import("./site-store.server");
   const doc = await readPublicEdits();
   return {
+    revision: doc.revision,
     copy: doc.copy,
     images: doc.images,
     herbs: doc.herbs as Record<string, HerbCopy>,
@@ -64,94 +72,116 @@ export const loadSitemapXml = createServerFn({ method: "GET" }).handler(async ()
 export const checkEditorPassword = createServerFn({ method: "POST" })
   .validator((data: { password: string }) => ({ password: data.password ?? "" }))
   .handler(async ({ data }) => {
-    const { passwordOk } = await import("./site-store.server");
-    return { ok: passwordOk(data.password) };
+    const result = await gate(data.password);
+    if (!result.ok) return { ok: false as const, message: result.message };
+    return { ok: true as const, message: "" };
   });
 
 export const saveSiteCopyFn = createServerFn({ method: "POST" })
-  .validator((data: { password: string; id: string; value: string }) => {
+  .validator((data: { password: string; id: string; value: string; revision: number }) => {
     const id = data.id?.trim() ?? "";
     const value = data.value ?? "";
     if (!id || id.length > 120 || value.length > 20000) {
       throw new Error("Za długi tekst.");
     }
-    return { password: data.password ?? "", id, value };
+    return { password: data.password ?? "", id, value, revision: Number(data.revision) };
   })
   .handler(async ({ data }) => {
-    const { passwordOk, saveCopy } = await import("./site-store.server");
-    if (!passwordOk(data.password)) return { ok: false as const };
-    await saveCopy(data.id, data.value);
-    return { ok: true as const };
+    const result = await gate(data.password);
+    if (!result.ok) return { ok: false as const, revision: data.revision, message: result.message };
+    const { saveCopy } = await import("./site-store.server");
+    const revision = await saveCopy(data.id, data.value, data.revision);
+    return { ok: true as const, revision, message: "" };
   });
 
 export const saveSiteImageFn = createServerFn({ method: "POST" })
-  .validator((data: { password: string; id: string; dataUrl: string }) => {
+  .validator((data: { password: string; id: string; dataUrl: string; revision: number }) => {
     const id = data.id?.trim() ?? "";
     const dataUrl = data.dataUrl ?? "";
     if (!id || id.length > 120 || dataUrl.length > 3_400_000) {
       throw new Error("Zdjęcie jest za duże.");
     }
-    return { password: data.password ?? "", id, dataUrl };
+    return { password: data.password ?? "", id, dataUrl, revision: Number(data.revision) };
   })
   .handler(async ({ data }) => {
-    const { passwordOk, saveImage } = await import("./site-store.server");
-    if (!passwordOk(data.password)) return { ok: false as const, url: "" };
-    const url = await saveImage(data.id, data.dataUrl);
-    return { ok: true as const, url };
+    const result = await gate(data.password);
+    if (!result.ok) return { ok: false as const, url: "", revision: data.revision, message: result.message };
+    const { saveImage } = await import("./site-store.server");
+    const saved = await saveImage(data.id, data.dataUrl, data.revision);
+    return { ok: true as const, url: saved.url, revision: saved.revision, message: "" };
   });
 
 export const saveHerbFn = createServerFn({ method: "POST" })
-  .validator((data: { password: string; slug: string; copy: unknown }) => {
+  .validator((data: { password: string; slug: string; copy: unknown; revision: number }) => {
     const slug = data.slug?.trim() ?? "";
     const raw = JSON.stringify(data.copy ?? {});
     if (!slug || slug.length > 80 || raw.length > 80000) {
       throw new Error("Opis jest za długi.");
     }
-    return { password: data.password ?? "", slug, copy: data.copy };
+    return { password: data.password ?? "", slug, copy: data.copy, revision: Number(data.revision) };
   })
   .handler(async ({ data }) => {
-    const { passwordOk, saveHerb } = await import("./site-store.server");
-    if (!passwordOk(data.password)) return { ok: false as const };
-    await saveHerb(data.slug, data.copy);
-    return { ok: true as const };
+    const result = await gate(data.password);
+    if (!result.ok) return { ok: false as const, revision: data.revision, message: result.message };
+    const { saveHerb } = await import("./site-store.server");
+    const revision = await saveHerb(data.slug, data.copy, data.revision);
+    return { ok: true as const, revision, message: "" };
   });
 
 export const listEntriesFn = createServerFn({ method: "POST" })
   .validator((data: { password: string }) => ({ password: data.password ?? "" }))
   .handler(async ({ data }) => {
-    const { passwordOk, readEdits } = await import("./site-store.server");
-    if (!passwordOk(data.password)) return { ok: false as const, entries: [] };
-    const doc = await readEdits();
-    return { ok: true as const, entries: doc.entries };
+    const result = await gate(data.password);
+    if (!result.ok) return { ok: false as const, entries: [], revision: 0, message: result.message };
+    const { readEditorDoc } = await import("./site-store.server");
+    const doc = await readEditorDoc();
+    return { ok: true as const, entries: doc.entries, revision: doc.revision, message: "" };
   });
 
 export const saveEntryFn = createServerFn({ method: "POST" })
-  .validator((data: { password: string; previousSlug?: string; entry: unknown }) => {
+  .validator((data: { password: string; previousSlug?: string; entry: unknown; revision: number }) => {
     const raw = JSON.stringify(data.entry ?? {});
     if (raw.length > 120_000) throw new Error("Opis jest za długi.");
     return {
       password: data.password ?? "",
       previousSlug: data.previousSlug?.trim() || "",
       entry: data.entry,
+      revision: Number(data.revision),
     };
   })
   .handler(async ({ data }) => {
-    const { passwordOk, saveEntry } = await import("./site-store.server");
-    if (!passwordOk(data.password)) return { ok: false as const, entry: null };
-    const entry = await saveEntry(data.entry, data.previousSlug || undefined);
-    return { ok: true as const, entry };
+    const result = await gate(data.password);
+    if (!result.ok) return { ok: false as const, entry: null, revision: data.revision, message: result.message };
+    const { saveEntry } = await import("./site-store.server");
+    const saved = await saveEntry(data.entry, data.previousSlug || undefined, data.revision);
+    return { ok: true as const, entry: saved.entry, revision: saved.revision, message: "" };
   });
 
 export const deleteEntryFn = createServerFn({ method: "POST" })
-  .validator((data: { password: string; slug: string }) => ({
+  .validator((data: { password: string; slug: string; revision: number }) => ({
     password: data.password ?? "",
     slug: data.slug?.trim() ?? "",
+    revision: Number(data.revision),
   }))
   .handler(async ({ data }) => {
-    const { passwordOk, deleteEntry } = await import("./site-store.server");
-    if (!passwordOk(data.password)) return { ok: false as const };
-    await deleteEntry(data.slug);
-    return { ok: true as const };
+    const result = await gate(data.password);
+    if (!result.ok) return { ok: false as const, revision: data.revision, message: result.message };
+    const { deleteEntry } = await import("./site-store.server");
+    const revision = await deleteEntry(data.slug, data.revision);
+    return { ok: true as const, revision, message: "" };
+  });
+
+export const restoreEditsFn = createServerFn({ method: "POST" })
+  .validator((data: { password: string; revision: number }) => ({
+    password: data.password ?? "",
+    revision: Number(data.revision),
+  }))
+  .handler(async ({ data }) => {
+    const result = await gate(data.password);
+    if (!result.ok) return { ok: false as const, revision: data.revision, message: result.message };
+    const { restorePrevious } = await import("./site-store.server");
+    const restored = await restorePrevious(data.revision);
+    return { ok: true as const, revision: restored.revision, message: "" };
   });
 
 export { empty };

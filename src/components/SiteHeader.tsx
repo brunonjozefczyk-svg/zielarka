@@ -4,7 +4,9 @@ import { Menu, Pencil, X } from "lucide-react";
 import { Mark } from "@/components/Mark";
 import { Button } from "@/components/ui/button";
 import { nav } from "@/lib/content";
-import { readEditorPassword, useEditMode } from "@/lib/site-editor";
+import { useEdits } from "@/lib/edits-context";
+import { adoptServerHerbs } from "@/lib/herb-editor";
+import { adoptServerCopy, applyRemoteImages, readEditorPassword, useEditMode } from "@/lib/site-editor";
 import { cn } from "@/lib/utils";
 
 export function SiteHeader() {
@@ -12,6 +14,7 @@ export function SiteHeader() {
   const [unlocked, setUnlocked] = useState(false);
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const { editing, setEditing } = useEditMode();
+  const edits = useEdits();
 
   useEffect(() => {
     setOpen(false);
@@ -70,7 +73,14 @@ export function SiteHeader() {
                 "inline-flex min-h-11 items-center gap-1.5 rounded-md px-3 text-sm font-medium",
                 editing ? "bg-forest text-cream" : "border border-forest text-forest",
               )}
-              onClick={() => setEditing(!editing)}
+              onClick={() => {
+                if (!editing) {
+                  adoptServerCopy(edits.copy);
+                  adoptServerHerbs(edits.herbs);
+                  void applyRemoteImages(edits.images);
+                }
+                setEditing(!editing);
+              }}
             >
               <Pencil className="size-4" />
               {editing ? "Gotowe" : "Edytuj"}

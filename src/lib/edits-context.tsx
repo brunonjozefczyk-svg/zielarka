@@ -3,13 +3,14 @@ import type { ManagedEntry } from "./entries";
 import type { HerbCopy } from "./herb-editor";
 
 export type PublicEdits = {
+  revision: number;
   copy: Record<string, string>;
   images: Record<string, string>;
   herbs: Record<string, HerbCopy>;
   entries: ManagedEntry[];
 };
 
-const empty: PublicEdits = { copy: {}, images: {}, herbs: {}, entries: [] };
+const empty: PublicEdits = { revision: 0, copy: {}, images: {}, herbs: {}, entries: [] };
 
 const EditsContext = createContext<PublicEdits>(empty);
 

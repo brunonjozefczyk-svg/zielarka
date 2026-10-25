@@ -1,8 +1,10 @@
 import { timingSafeEqual } from "node:crypto";
 import { herbs } from "./herbs";
 import { builtinSlugs, type ManagedEntry, normalizeEntry, parseStoredEntry, slugify } from "./entries";
+import { assertRevision, createAttemptLimiter, toPublicDoc, urlsToPrune, type StampBlob } from "./cms-guard";
 
 export type SiteEdits = {
+  revision: number;
   copy: Record<string, string>;
   images: Record<string, string>;
   herbs: Record<string, unknown>;
@@ -11,12 +13,17 @@ export type SiteEdits = {
 
 const DOC = "zielarka/content.json";
 const DOCS = "zielarka/docs/";
+const PRIVATE_DOCS = "zielarka/private/";
+const PUBLIC_DOCS = "zielarka/public/";
+const PUBLIC_CACHE_MS = 30_000;
+const PRIVATE_KEEP = 8;
+const PUBLIC_KEEP = 3;
 
 function empty(): SiteEdits {
-  return { copy: {}, images: {}, herbs: {}, entries: [] };
+  return { revision: 0, copy: {}, images: {}, herbs: {}, entries: [] };
 }
 
-let cache: { at: number; data: SiteEdits } | null = null;
+let publicCache: { at: number; data: SiteEdits } | null = null;
 
 function token() {
   return process.env.BLOB_READ_WRITE_TOKEN?.trim() || "";
@@ -29,6 +36,18 @@ export function passwordOk(given: string) {
   const b = Buffer.from(expected);
   if (a.length !== b.length) return false;
   return timingSafeEqual(a, b);
+}
+
+const attempts = createAttemptLimiter();
+
+export function editorGate(password: string, key: string) {
+  if (attempts.blocked(key || "local")) {
+    return { ok: false as const, message: "Za dużo prób. Spróbuj za kwadrans." };
+  }
+  const ok = passwordOk(password);
+  attempts.note(key || "local", ok);
+  if (!ok) return { ok: false as const, message: "Złe hasło." };
+  return { ok: true as const, message: "" };
 }
 
 const BLOB_API = "11";
@@ -45,29 +64,17 @@ async function blobPut(pathname: string, body: BodyInit, contentType: string) {
       "x-content-type": contentType,
       "x-add-random-suffix": "0",
       "x-allow-overwrite": "1",
-      "x-cache-control-max-age": "86400",
+      "x-cache-control-max-age": contentType.startsWith("image/") ? "86400" : "60",
     },
     body,
   });
   if (!res.ok) {
     throw new Error(`Zapis nie powiódł się (${res.status}).`);
   }
-  return (await res.json()) as { url: string };
+  return (await res.json()) as { url: string; downloadUrl?: string };
 }
 
-async function blobHead(pathname: string) {
-  const key = token();
-  if (!key) throw new Error("Brak magazynu treści.");
-  const url = `https://vercel.com/api/blob/?${new URLSearchParams({ url: pathname })}`;
-  const res = await fetch(url, {
-    headers: { authorization: `Bearer ${key}`, "x-api-version": BLOB_API },
-  });
-  if (res.status === 404) return null;
-  if (!res.ok) throw new Error(`Odczyt nie powiódł się (${res.status}).`);
-  return (await res.json()) as { url?: string };
-}
-
-type BlobMeta = { url?: string; pathname?: string; uploadedAt?: string | number };
+type BlobMeta = { url?: string; downloadUrl?: string; pathname?: string; uploadedAt?: string | number };
 
 async function blobList(prefix: string) {
   const key = token();
@@ -81,9 +88,21 @@ async function blobList(prefix: string) {
   return data.blobs ?? [];
 }
 
+async function blobHead(pathname: string) {
+  const key = token();
+  if (!key) throw new Error("Brak magazynu treści.");
+  const url = `https://vercel.com/api/blob/?${new URLSearchParams({ url: pathname })}`;
+  const res = await fetch(url, {
+    headers: { authorization: `Bearer ${key}`, "x-api-version": BLOB_API },
+  });
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`Odczyt nie powiódł się (${res.status}).`);
+  return (await res.json()) as BlobMeta;
+}
+
 async function blobDelete(urls: string[]) {
   const key = token();
-  const clean = urls.filter((url) => url.includes("vercel-storage.com"));
+  const clean = [...new Set(urls.filter((url) => url.includes("vercel-storage.com")))];
   if (!key || clean.length === 0) return;
   await fetch("https://vercel.com/api/blob/delete", {
     method: "POST",
@@ -101,8 +120,20 @@ function blobStamp(blob: BlobMeta) {
   return Number.isFinite(value) ? value : 0;
 }
 
-function parseDoc(data: Partial<SiteEdits>): SiteEdits {
+function readUrl(blob: BlobMeta) {
+  return blob.downloadUrl || blob.url || "";
+}
+
+function newest(blobs: BlobMeta[]) {
+  return blobs
+    .filter((blob) => blob.pathname && readUrl(blob))
+    .sort((a, b) => blobStamp(b) - blobStamp(a) || String(b.pathname).localeCompare(String(a.pathname)))[0];
+}
+
+function parseDoc(data: Partial<SiteEdits> & { revision?: unknown }): SiteEdits {
+  const revision = typeof data.revision === "number" && Number.isFinite(data.revision) ? data.revision : 0;
   return {
+    revision,
     copy: data.copy && typeof data.copy === "object" ? data.copy : {},
     images: data.images && typeof data.images === "object" ? data.images : {},
     herbs: data.herbs && typeof data.herbs === "object" ? data.herbs : {},
@@ -121,37 +152,36 @@ async function fetchDoc(url: string) {
   return parseDoc((await res.json()) as Partial<SiteEdits>);
 }
 
-async function loadDoc(): Promise<SiteEdits> {
-  if (cache && Date.now() - cache.at < 5000) return cache.data;
-  const docs = await blobList(DOCS);
-  const latest = docs
-    .filter((blob) => blob.url)
-    .sort((a, b) => blobStamp(b) - blobStamp(a) || String(b.pathname).localeCompare(String(a.pathname)))[0];
-  const legacy = latest ? null : await blobHead(DOC);
-  const url = latest?.url || legacy?.url;
-  if (!url) {
-    const doc = empty();
-    cache = { at: Date.now(), data: doc };
-    return doc;
-  }
-  const doc = await fetchDoc(url);
-  cache = { at: Date.now(), data: doc };
-  return doc;
+async function loadLegacy(): Promise<SiteEdits | null> {
+  const latest = newest(await blobList(DOCS));
+  if (latest) return fetchDoc(readUrl(latest));
+  const legacy = await blobHead(DOC);
+  if (!legacy || !readUrl(legacy)) return null;
+  return fetchDoc(readUrl(legacy));
 }
 
-export async function readEdits(): Promise<SiteEdits> {
-  if (!token()) return empty();
+async function loadPrivateFresh(): Promise<SiteEdits> {
+  const latest = newest(await blobList(PRIVATE_DOCS));
+  if (latest) return fetchDoc(readUrl(latest));
+  return (await loadLegacy()) ?? empty();
+}
+
+async function loadPublic(): Promise<SiteEdits> {
+  if (publicCache && Date.now() - publicCache.at < PUBLIC_CACHE_MS) return publicCache.data;
   try {
-    return await loadDoc();
-  } catch {
-    console.error("Nie udało się odczytać treści strony.");
-    return empty();
+    const latest = newest(await blobList(PUBLIC_DOCS));
+    const doc = latest ? toPublicDoc(await fetchDoc(readUrl(latest))) : toPublicDoc((await loadLegacy()) ?? empty());
+    publicCache = { at: Date.now(), data: doc };
+    return doc;
+  } catch (error) {
+    if (publicCache) return publicCache.data;
+    throw error;
   }
 }
 
-async function readForWrite(): Promise<SiteEdits> {
-  const doc = await loadDoc();
+function clone(doc: SiteEdits): SiteEdits {
   return {
+    revision: doc.revision,
     copy: { ...doc.copy },
     images: { ...doc.images },
     herbs: { ...doc.herbs },
@@ -160,41 +190,64 @@ async function readForWrite(): Promise<SiteEdits> {
 }
 
 export async function readPublicEdits(): Promise<SiteEdits> {
-  const doc = await readEdits();
-  return { ...doc, entries: doc.entries.filter((entry) => entry.status === "published") };
-}
-
-async function writeEdits(doc: SiteEdits) {
-  cache = null;
-  const pathname = `${DOCS}${Date.now()}-${Math.random().toString(36).slice(2, 8)}.json`;
-  await blobPut(pathname, JSON.stringify(doc), "application/json");
-  cache = { at: Date.now(), data: doc };
+  if (!token()) return empty();
   try {
-    const docs = await blobList(DOCS);
-    if (!docs.some((blob) => blob.pathname === pathname)) return;
-    const stale = docs.filter((blob) => blob.pathname !== pathname).map((blob) => blob.url || "");
-    const legacy = await blobHead(DOC);
-    if (legacy?.url) stale.push(legacy.url);
-    await blobDelete(stale);
+    return await loadPublic();
   } catch {
-    // Następny zapis sprzątnie starsze kopie. Bieżąca jest już zapisana.
+    console.error("Nie udało się odczytać treści strony.");
+    return publicCache?.data ?? empty();
   }
 }
 
-export async function saveCopy(id: string, value: string) {
-  const doc = await readForWrite();
-  doc.copy[id] = value;
-  await writeEdits(doc);
+async function readForWrite(): Promise<SiteEdits> {
+  return clone(await loadPrivateFresh());
 }
 
-export async function saveHerb(slug: string, copy: unknown) {
+async function prune(prefix: string, keep: number, writtenPath: string) {
+  const blobs = await blobList(prefix);
+  const stamps: StampBlob[] = blobs.flatMap((blob) => {
+    const url = blob.url || "";
+    const pathname = blob.pathname || "";
+    if (!url || !pathname) return [];
+    return [{ pathname, url, uploadedAt: blobStamp(blob) }];
+  });
+  await blobDelete(urlsToPrune(stamps, keep, writtenPath));
+}
+
+async function writeEdits(doc: SiteEdits) {
+  const next: SiteEdits = { ...doc, revision: doc.revision + 1 };
+  const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const privatePath = `${PRIVATE_DOCS}${id}.json`;
+  const publicPath = `${PUBLIC_DOCS}${id}.json`;
+  await blobPut(privatePath, JSON.stringify(next), "application/json");
+  const published = toPublicDoc(next);
+  await blobPut(publicPath, JSON.stringify(published), "application/json");
+  publicCache = { at: Date.now(), data: published };
+  try {
+    await prune(PRIVATE_DOCS, PRIVATE_KEEP, privatePath);
+    await prune(PUBLIC_DOCS, PUBLIC_KEEP, publicPath);
+  } catch {
+    // Starsze kopie zostają. Bieżący zapis już jest.
+  }
+  return next.revision;
+}
+
+export async function saveCopy(id: string, value: string, expectedRevision: number) {
   const doc = await readForWrite();
+  assertRevision(doc.revision, expectedRevision);
+  doc.copy[id] = value;
+  return writeEdits(doc);
+}
+
+export async function saveHerb(slug: string, copy: unknown, expectedRevision: number) {
+  const doc = await readForWrite();
+  assertRevision(doc.revision, expectedRevision);
   if (copy == null) delete doc.herbs[slug];
   else doc.herbs[slug] = copy;
-  await writeEdits(doc);
+  return writeEdits(doc);
 }
 
-export async function saveImage(id: string, dataUrl: string) {
+async function storeImageBytes(id: string, dataUrl: string) {
   const match = /^data:image\/(?:jpeg|png|webp);base64,([a-z0-9+/=\s]+)$/i.exec(dataUrl);
   if (!match) throw new Error("To nie jest zdjęcie.");
   const bytes = Buffer.from(match[1].replace(/\s/g, ""), "base64");
@@ -204,12 +257,16 @@ export async function saveImage(id: string, dataUrl: string) {
   const safe = id.replace(/[^a-z0-9_-]/gi, "").slice(0, 80) || "obraz";
   const ext = kind === "image/png" ? "png" : kind === "image/webp" ? "webp" : "jpg";
   const blob = await blobPut(`zielarka/images/${safe}-${Date.now()}.${ext}`, bytes, kind);
-  const doc = await readForWrite();
-  const previous = doc.images[id];
-  doc.images[id] = blob.url;
-  await writeEdits(doc);
-  if (previous && previous !== blob.url) await blobDelete([previous]);
   return blob.url;
+}
+
+export async function saveImage(id: string, dataUrl: string, expectedRevision: number) {
+  const url = await storeImageBytes(id, dataUrl);
+  const doc = await readForWrite();
+  assertRevision(doc.revision, expectedRevision);
+  doc.images[id] = url;
+  const revision = await writeEdits(doc);
+  return { url, revision };
 }
 
 function imageKind(bytes: Buffer) {
@@ -227,11 +284,12 @@ function takenSlugs(doc: SiteEdits, except?: string) {
   return taken;
 }
 
-export async function saveEntry(input: unknown, previousSlug?: string) {
+export async function saveEntry(input: unknown, previousSlug: string | undefined, expectedRevision: number) {
   if (previousSlug && builtinSlugs().has(previousSlug)) {
     throw new Error("Tej rośliny nie da się podmienić. Jest częścią zielnika.");
   }
   const preview = await readForWrite();
+  assertRevision(preview.revision, expectedRevision);
   const current = previousSlug ? preview.entries.find((entry) => entry.slug === previousSlug) : undefined;
   const raw = input && typeof input === "object" ? (input as { slug?: unknown }) : {};
   const wanted = slugify(String(raw.slug ?? ""));
@@ -244,11 +302,14 @@ export async function saveEntry(input: unknown, previousSlug?: string) {
     current?.status === "published" || current?.history.some((item) => item.status === "published");
   if (publishedBefore && current) next.slug = current.slug;
   if (next.image.startsWith("data:")) {
-    next.image = await saveImage(`img.herb.${next.slug}`, next.image);
+    next.image = await storeImageBytes(`img.herb.${next.slug}`, next.image);
   } else if (!next.image && current) {
     next.image = current.image;
   }
   const doc = await readForWrite();
+  if (doc.revision !== preview.revision) {
+    throw new Error("Ktoś zapisał w międzyczasie. Odśwież stronę.");
+  }
   next.history = current
     ? [
         ...current.history,
@@ -264,17 +325,37 @@ export async function saveEntry(input: unknown, previousSlug?: string) {
     ...doc.entries.filter((entry) => entry.slug !== previousSlug && entry.slug !== next.slug),
     next,
   ];
-  await writeEdits(doc);
-  return next;
+  const revision = await writeEdits(doc);
+  return { entry: next, revision };
 }
 
-export async function deleteEntry(slug: string) {
+export async function deleteEntry(slug: string, expectedRevision: number) {
   if (builtinSlugs().has(slug)) throw new Error("Tej rośliny nie da się usunąć.");
   const doc = await readForWrite();
+  assertRevision(doc.revision, expectedRevision);
   const found = doc.entries.some((entry) => entry.slug === slug);
   if (!found) throw new Error("Nie ma takiej karty.");
   doc.entries = doc.entries.filter((entry) => entry.slug !== slug);
-  await writeEdits(doc);
+  return writeEdits(doc);
+}
+
+export async function restorePrevious(expectedRevision: number) {
+  const current = await readForWrite();
+  assertRevision(current.revision, expectedRevision);
+  const sorted = (await blobList(PRIVATE_DOCS))
+    .filter((blob) => blob.pathname && readUrl(blob))
+    .sort((a, b) => blobStamp(b) - blobStamp(a) || String(b.pathname).localeCompare(String(a.pathname)));
+  const previous = sorted[1];
+  if (!previous) throw new Error("Nie ma starszej kopii.");
+  const restored = await fetchDoc(readUrl(previous));
+  restored.revision = current.revision;
+  const revision = await writeEdits(restored);
+  return { revision };
+}
+
+export async function readEditorDoc() {
+  const doc = await readForWrite();
+  return doc;
 }
 
 export function publishedHerbs(doc: SiteEdits) {

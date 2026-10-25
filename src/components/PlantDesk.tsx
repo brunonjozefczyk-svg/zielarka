@@ -8,11 +8,16 @@ import { Textarea } from "@/components/ui/textarea";
 import { slugify, type EntryStatus, type ManagedEntry } from "@/lib/entries";
 import { herbs } from "@/lib/herbs";
 import {
+  adoptServerCopy,
+  applyRemoteImages,
   clearEditorPassword,
   readEditorPassword,
   resizeImageFile,
+  setEditorRevision,
   writeEditMode,
 } from "@/lib/site-editor";
+import { adoptServerHerbs } from "@/lib/herb-editor";
+import { useEdits } from "@/lib/edits-context";
 
 type Faq = { q: string; a: string };
 
@@ -109,7 +114,9 @@ function errorText(error: unknown) {
 
 export function PlantDesk({ onLock }: { onLock: () => void }) {
   const navigate = useNavigate();
+  const edits = useEdits();
   const [entries, setEntries] = useState<ManagedEntry[]>([]);
+  const [revision, setRevision] = useState(0);
   const [draft, setDraft] = useState<Draft | null>(null);
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -123,11 +130,17 @@ export function PlantDesk({ onLock }: { onLock: () => void }) {
     const { listEntriesFn } = await import("@/lib/site-api");
     const result = await listEntriesFn({ data: { password } });
     if (!result.ok) {
+      if (result.message?.includes("dużo")) {
+        toast.error(result.message);
+        return;
+      }
       onLock();
-      toast.error("Hasło wygasło. Wpisz je jeszcze raz.");
+      toast.error(result.message || "Hasło wygasło. Wpisz je jeszcze raz.");
       return;
     }
     setEntries(result.entries);
+    setRevision(result.revision);
+    setEditorRevision(result.revision);
   }
 
   useEffect(() => {
@@ -198,6 +211,7 @@ export function PlantDesk({ onLock }: { onLock: () => void }) {
         data: {
           password,
           previousSlug: draft.previousSlug,
+          revision,
           entry: {
             slug: draft.slugTouched ? draft.slug : "",
             status,
@@ -223,11 +237,16 @@ export function PlantDesk({ onLock }: { onLock: () => void }) {
         },
       });
       if (!result.ok || !result.entry) {
-        onLock();
-        toast.error("Złe hasło.");
+        if (result.message?.includes("dużo")) toast.error(result.message);
+        else {
+          onLock();
+          toast.error(result.message || "Złe hasło.");
+        }
         return;
       }
       const saved = result.entry;
+      setRevision(result.revision);
+      setEditorRevision(result.revision);
       toast.success(
         saved.status === "published"
           ? `Opublikowane: /zielnik/${saved.slug}`
@@ -252,14 +271,45 @@ export function PlantDesk({ onLock }: { onLock: () => void }) {
     setBusy(true);
     try {
       const { deleteEntryFn } = await import("@/lib/site-api");
-      const result = await deleteEntryFn({ data: { password, slug } });
+      const result = await deleteEntryFn({ data: { password, slug, revision } });
       if (!result.ok) {
-        onLock();
-        toast.error("Złe hasło.");
+        if (result.message?.includes("dużo")) toast.error(result.message);
+        else {
+          onLock();
+          toast.error(result.message || "Złe hasło.");
+        }
         return;
       }
+      setRevision(result.revision);
+      setEditorRevision(result.revision);
       if (draft?.previousSlug === slug) setDraft(null);
       toast.success("Karta usunięta.");
+      await reload();
+    } catch (error) {
+      toast.error(errorText(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function restore() {
+    if (!window.confirm("Przywrócić poprzedni zapis całej strony? Aktualna wersja zostanie kopią.")) return;
+    const password = readEditorPassword();
+    if (!password) {
+      onLock();
+      return;
+    }
+    setBusy(true);
+    try {
+      const { restoreEditsFn } = await import("@/lib/site-api");
+      const result = await restoreEditsFn({ data: { password, revision } });
+      if (!result.ok) {
+        toast.error(result.message || "Nie udało się przywrócić.");
+        return;
+      }
+      setRevision(result.revision);
+      setEditorRevision(result.revision);
+      toast.success("Przywrócono poprzedni zapis.");
       await reload();
     } catch (error) {
       toast.error(errorText(error));
@@ -287,6 +337,9 @@ export function PlantDesk({ onLock }: { onLock: () => void }) {
           type="button"
           variant="outline"
           onClick={() => {
+            adoptServerCopy(edits.copy);
+            adoptServerHerbs(edits.herbs);
+            void applyRemoteImages(edits.images);
             writeEditMode(true);
             void navigate({ to: "/" });
           }}
@@ -302,6 +355,9 @@ export function PlantDesk({ onLock }: { onLock: () => void }) {
           }}
         >
           Wyloguj
+        </Button>
+        <Button type="button" variant="outline" disabled={busy} onClick={() => void restore()}>
+          Przywróć poprzedni zapis
         </Button>
       </div>
 

@@ -7,6 +7,10 @@ import { Button } from "@/components/ui/button";
 import { readEditorPassword, writeEditorPassword } from "@/lib/site-editor";
 
 export const Route = createFileRoute("/edytuj")({
+  headers: () => ({
+    "Cache-Control": "private, no-store",
+    "X-Robots-Tag": "noindex, nofollow",
+  }),
   head: () => ({
     meta: [
       { title: "Edycja — Zielarka.pl" },
@@ -47,7 +51,7 @@ function EditGate() {
                 .then(({ checkEditorPassword }) => checkEditorPassword({ data: { password: next } }))
                 .then((result) => {
                   if (!result.ok) {
-                    toast.error("Złe hasło.");
+                    toast.error(result.message || "Złe hasło.");
                     return;
                   }
                   writeEditorPassword(next);

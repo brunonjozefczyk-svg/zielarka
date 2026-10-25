@@ -75,7 +75,12 @@ export function EditableText({
                       setOpen(false);
                       toast.success("Zapisane. Widać to też na innych telefonach.");
                     })
-                    .catch(() => toast.error("Nie udało się zapisać. Sprawdź hasło i sieć."));
+                    .catch((error: unknown) => {
+                      const text = error instanceof Error ? error.message : "";
+                      toast.error(
+                        text && text.length < 180 ? text : "Nie udało się zapisać. Sprawdź hasło i sieć.",
+                      );
+                    });
                 }}
               >
                 Zapisz

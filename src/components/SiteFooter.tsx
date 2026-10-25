@@ -12,7 +12,10 @@ export function SiteFooter() {
             <span className="font-display text-2xl">Zielarka.pl</span>
           </div>
           <p className="mt-3 text-sm leading-relaxed text-cream/80">
-            {site.person} — {site.bio}
+            {site.person}, zielarka-fitoterapeutka. Kraków.{" "}
+            <Link to="/o-mnie" className="underline">
+              Kwalifikacje
+            </Link>
           </p>
         </div>
         <div>

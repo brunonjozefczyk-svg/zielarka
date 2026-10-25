@@ -99,8 +99,15 @@ function HerbPage() {
               <dd className="mt-1 text-ink">{herb.habitat}</dd>
             </div>
             <div className="sm:col-span-2 rounded-lg border border-line bg-cream p-5 text-sm leading-relaxed text-muted">
-              Pisze {site.person}, zielarka-fitoterapeutka. {site.education}. Opis ma charakter
-              edukacyjny i tradycyjny — nie zastępuje konsultacji lekarskiej.
+              Pisze{" "}
+              <Link to="/o-mnie" className="text-forest underline">
+                {site.person}
+              </Link>
+              . Opis jest edukacyjny i oparty na tradycji. Nie zastępuje konsultacji lekarskiej.{" "}
+              <Link to="/o-mnie" className="text-forest underline">
+                Kwalifikacje autorki
+              </Link>
+              .
             </div>
           </dl>
         </div>

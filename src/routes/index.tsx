@@ -86,7 +86,7 @@ function Home() {
           <EditableText
             id="home.whyTitle"
             as="h2"
-            defaultValue="Pomagam wrócić do zdrowia przy pomocy ziół."
+            defaultValue="Zioła mogą Cię wspierać dzień po dniu."
             className="mt-3 font-display text-3xl font-medium text-forest sm:text-4xl"
           />
           <EditableText

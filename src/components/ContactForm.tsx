@@ -1,4 +1,6 @@
 import { useState, type FormEvent } from "react";
+import { Link } from "@tanstack/react-router";
+import { site } from "@/lib/content";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -44,8 +46,12 @@ export function ContactForm() {
       <div className="rounded-lg border border-line bg-cream p-8">
         <p className="font-display text-2xl text-forest">Dziękuję.</p>
         <p className="mt-3 max-w-md text-muted leading-relaxed">
-          Twoja wiadomość jest zapisana. Wrócę z odpowiedzią na podany e-mail — zwykle w ciągu
-          kilku dni roboczych.
+          Ta wiadomość została zapisana tylko w tej przeglądarce. Sabina jej stąd nie dostaje.
+          Napisz do niej na{" "}
+          <a href={site.facebook} className="text-forest underline" target="_blank" rel="noreferrer">
+            Facebooku Zielarka.pl
+          </a>
+          , tam odpisuje.
         </p>
         <Button className="mt-6" variant="outline" onClick={() => setSent(false)}>
           Napisz kolejną
@@ -104,8 +110,20 @@ export function ContactForm() {
         />
       </div>
       <Button type="submit" size="lg">
-        Wyślij zgłoszenie
+        Zapisz szkic
       </Button>
+      <p className="text-sm leading-relaxed text-muted">
+        Formularz nie wysyła jeszcze maila na skrzynkę Sabiny. Żeby dostać odpowiedź, napisz na{" "}
+        <a href={site.facebook} className="text-forest underline" target="_blank" rel="noreferrer">
+          Facebooku
+        </a>{" "}
+        albo zostaw zgłoszenie i podaj maila w treści — ale dopóki nie podepniemy skrzynki, ta
+        wiadomość zostaje w Twojej przeglądarce.{" "}
+        <Link to="/konsultacje" className="text-forest underline">
+          Jak wygląda konsultacja
+        </Link>
+        .
+      </p>
     </form>
   );
 }

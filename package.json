@@ -1,7 +1,6 @@
 {
   "name": "zielarka",
   "private": true,
-  "sideEffects": false,
   "type": "module",
   "scripts": {
     "dev": "vite dev --host 0.0.0.0 --port 8080",
@@ -17,14 +16,15 @@
     "lucide-react": "^0.510.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
+    "sonner": "^2.0.7",
+    "tailwind-merge": "^3.5.0",
     "tailwindcss": "^4.3.0",
-    "vite": "^8.2.0"
+    "clsx": "^2.1.1"
   },
   "devDependencies": {
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
     "@vitejs/plugin-react": "^5.2.0",
-    "nitro": "3.0.260610-beta",
     "typescript": "^5.7.0",
     "vite": "^8.2.0"
   }

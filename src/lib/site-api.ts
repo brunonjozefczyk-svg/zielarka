@@ -101,7 +101,12 @@ export const sendContactFn = createServerFn({ method: "POST" })
     if (data.spam) return { ok: true as const };
     const response = await fetch("https://formsubmit.co/ajax/kontakt@zielarka.pl", {
       method: "POST",
-      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        Origin: "https://zielarka.pl",
+        Referer: "https://zielarka.pl/kontakt",
+      },
       body: JSON.stringify({
         name: data.name,
         email: data.email,
@@ -115,7 +120,11 @@ export const sendContactFn = createServerFn({ method: "POST" })
     });
     const body = (await response.json().catch(() => ({}))) as { success?: string; message?: string };
     if (String(body.success) !== "true") {
-      return { ok: false as const, message: body.message ?? "Nie udało się wysłać." };
+      const raw = body.message ?? "";
+      const message = raw.includes("Activation")
+        ? "Otwórz skrzynkę kontakt@zielarka.pl i kliknij link „Activate Form”. Potem wyślij wiadomość jeszcze raz."
+        : raw || "Nie udało się wysłać.";
+      return { ok: false as const, message };
     }
     return { ok: true as const };
   });

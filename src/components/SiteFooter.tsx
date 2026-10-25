@@ -8,7 +8,7 @@ export function SiteFooter() {
       <div className="mx-auto grid max-w-6xl gap-10 px-4 py-14 sm:px-6 md:grid-cols-3">
         <div>
           <div className="flex items-center gap-2">
-            <Mark className="size-7" />
+            <Mark className="size-7 brightness-0 invert" />
             <span className="font-display text-2xl">Zielarka.pl</span>
           </div>
           <p className="mt-3 text-sm leading-relaxed text-cream/80">

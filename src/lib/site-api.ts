@@ -400,7 +400,9 @@ export const sendContactFn = createServerFn({ method: "POST" })
       const message = raw.includes("Activation")
         ? "Otwórz skrzynkę kontakt@zielarka.pl i kliknij link „Activate Form”. Potem wyślij wiadomość jeszcze raz."
         : raw || "Nie udało się wysłać.";
-      return { ok: false as const, message };
+      return { ok: false as const, message, receipt: "" };
     }
-    return { ok: true as const };
+    const { issueFormReceipt } = await import("./analytics.server");
+    const receipt = issueFormReceipt(process.env.CMS_SEAL_KEY?.trim() || "");
+    return { ok: true as const, receipt };
   });

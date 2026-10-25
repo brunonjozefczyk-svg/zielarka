@@ -117,10 +117,20 @@ export function eventFromClick(href: string): TrackEvent | null {
   return null;
 }
 
-export function formSuccessPath(pathname: string, search: string): boolean {
-  if (pathname !== "/kontakt") return false;
-  const params = new URLSearchParams(search.startsWith("?") ? search.slice(1) : search);
-  return params.get("wyslane") === "1";
+export const CONVERSION_NOTE =
+  "Potwierdzonym zgłoszeniem jest tylko zdarzenie po odpowiedzi usługi formularza. Adres /kontakt?wyslane=1 da się wpisać ręcznie, więc nie jest klientem. Kliknięcie „Wyślij” też nie. Formularz na stronie nadal wysyła wiadomość po staremu — nie przełączałem go bez Twojej zgody. Do Google nie idzie treść wiadomości, e-mail ani opis zdrowia.";
+
+export function formSuccessPath(_pathname: string, _search: string): boolean {
+  return false;
+}
+
+/** Jedno przyjęte zgłoszenie = jeden identyfikator. Odświeżenie strony nie ma tego identyfikatora. */
+export function shouldCountDelivery(accepted: boolean, receipt: string, seen: Set<string>): boolean {
+  if (!accepted || !receipt || receipt.length < 20 || receipt.length > 300) return false;
+  if (receipt.includes("@") || /\s/.test(receipt) || receipt.includes("http")) return false;
+  if (seen.has(receipt)) return false;
+  seen.add(receipt);
+  return true;
 }
 
 export function trackOnThisPage(pathname: string): boolean {

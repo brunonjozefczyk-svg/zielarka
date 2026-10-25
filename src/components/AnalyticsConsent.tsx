@@ -5,7 +5,6 @@ import {
   claimPageView,
   consentFromChoice,
   eventFromClick,
-  formSuccessPath,
   pageViewKey,
   readStoredConsent,
   sanitizeEvent,
@@ -23,7 +22,6 @@ declare global {
 }
 
 const pageState = { key: "", at: 0 };
-const formState = { key: "", at: 0 };
 
 function installGtag(measurementId: string, choice: ConsentChoice) {
   if (typeof window === "undefined") return;
@@ -73,10 +71,6 @@ export function AnalyticsConsent({ measurementId }: { measurementId: string }) {
         page_path: pathname,
         page_title: document.title.slice(0, 120),
       });
-    }
-    if (formSuccessPath(pathname, searchStr) && claimPageView(`form:${key}`, Date.now(), formState)) {
-      const clean = sanitizeEvent("form_success", { page_path: pathname });
-      if (clean) window.gtag?.("event", clean.name, clean.params);
     }
   }, [choice, pathname, searchStr]);
 

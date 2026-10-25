@@ -2,8 +2,9 @@
  * Raporty GA4 i Search Console. Sekrety tylko ze zmiennych serwera.
  * Brak VITE_ w odpowiedziach z liczbami, gdy konta nie podłączono.
  */
-import { createSign } from "node:crypto";
+import { createHmac, createSign, randomBytes, timingSafeEqual } from "node:crypto";
 import {
+  CONVERSION_NOTE,
   GSC_PRIVACY_NOTE,
   GSC_STEPS,
   ORGANIC_NOTE,
@@ -437,7 +438,7 @@ async function buildReport(
     );
     payload.conversions = {
       events: decorateEvents(parseEvents(report)),
-      note: "Zliczane są tylko nazwy zdarzeń. Treść wiadomości, e-mail i opis zdrowia nie wychodzą ze strony.",
+      note: CONVERSION_NOTE,
     };
     return payload;
   }
@@ -487,4 +488,27 @@ async function buildReport(
     note: GSC_PRIVACY_NOTE,
   };
   return payload;
+}
+
+/** Potwierdzenie dla przyszłego przełączenia formularza. Sekret nie wychodzi do przeglądarki. */
+export function issueFormReceipt(secret: string, now = Date.now()): string {
+  if (!secret.trim()) return "";
+  const exp = now + 10 * 60_000;
+  const nonce = randomBytes(16).toString("base64url");
+  const body = `${nonce}.${exp}`;
+  const sig = createHmac("sha256", secret).update(body).digest("base64url");
+  return `${body}.${sig}`;
+}
+
+export function receiptValid(id: string, secret: string, now = Date.now()): boolean {
+  const parts = id.split(".");
+  if (parts.length !== 3 || !secret.trim()) return false;
+  const [nonce, expRaw, sig] = parts;
+  const exp = Number(expRaw);
+  if (!nonce || !Number.isFinite(exp) || exp < now) return false;
+  const expected = createHmac("sha256", secret).update(`${nonce}.${expRaw}`).digest("base64url");
+  const left = Buffer.from(sig);
+  const right = Buffer.from(expected);
+  if (left.length !== right.length) return false;
+  return timingSafeEqual(left, right);
 }

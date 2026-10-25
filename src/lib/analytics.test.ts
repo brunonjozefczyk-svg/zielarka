@@ -23,9 +23,10 @@ import {
   readStoredConsent,
   resolveRange,
   sanitizeEvent,
+  shouldCountDelivery,
   type GaRunReport,
 } from "./analytics.ts";
-import { loadStats, readAnalyticsEnv, signServiceJwt } from "./analytics.server.ts";
+import { issueFormReceipt, loadStats, readAnalyticsEnv, receiptValid, signServiceJwt } from "./analytics.server.ts";
 
 test("domyślna zgoda blokuje analitykę i reklamy", () => {
   const flags = defaultConsent();
@@ -68,9 +69,22 @@ test("zdarzenia nie zabierają treści wiadomości ani adresu", () => {
   assert.equal(JSON.stringify(clean).includes("gardło"), false);
   assert.equal(JSON.stringify(clean).includes("kontakt@"), false);
   assert.equal(sanitizeEvent("purchase", {}), null);
-  assert.equal(formSuccessPath("/kontakt", "?wyslane=1"), true);
+  assert.equal(formSuccessPath("/kontakt", "?wyslane=1"), false);
   assert.equal(formSuccessPath("/kontakt", ""), false);
-  assert.equal(formSuccessPath("/konsultacje", "?wyslane=1"), false);
+  const seen = new Set<string>();
+  assert.equal(shouldCountDelivery(false, "a".repeat(24), seen), false);
+  assert.equal(shouldCountDelivery(true, "", seen), false);
+  const receipt = issueFormReceipt("sekret-testowy", 1_700_000_000_000);
+  assert.equal(receipt.includes("@"), false);
+  assert.equal(receipt.includes("gardło"), false);
+  assert.equal(receiptValid(receipt, "sekret-testowy", 1_700_000_000_000), true);
+  assert.equal(receiptValid(receipt, "sekret-testowy", 1_700_000_000_000 + 11 * 60_000), false);
+  assert.equal(receiptValid(`${receipt}x`, "sekret-testowy", 1_700_000_000_000), false);
+  assert.equal(shouldCountDelivery(true, receipt, seen), true);
+  assert.equal(shouldCountDelivery(true, receipt, seen), false);
+  const start = sanitizeEvent("form_start", { page_path: "/kontakt", message: "boli mnie gardło", email: "a@b.c" });
+  assert.equal(JSON.stringify(start).includes("gardło"), false);
+  assert.equal(start?.name, "form_start");
 });
 
 test("parser GA4 nie wymyśla brakujących metryk", () => {

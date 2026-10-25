@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import {
+  CONVERSION_NOTE,
   ENGAGEMENT_NOTE,
   formatCount,
   formatDelta,
@@ -268,7 +269,7 @@ export function StatsPanel() {
           onOpen={(path) => openPage(path, "seo")}
         />
       ) : null}
-      {visible?.configured && visible.conversions ? <Conversions report={visible} /> : null}
+      {section === "conversions" ? <Conversions report={visible} /> : null}
       {visible?.configured && visible.page ? (
         <PageDetail
           report={visible}
@@ -530,30 +531,43 @@ function QueryList({ title, rows }: { title: string; rows: StatsPayload["seo"] e
   );
 }
 
-function Conversions({ report }: { report: StatsPayload }) {
-  const events = report.conversions?.events ?? [];
+function Conversions({ report }: { report: StatsPayload | null }) {
+  const events = report?.conversions?.events ?? [];
   return (
     <section className="mt-6">
-      <p className="text-sm text-muted">{report.conversions?.note}</p>
-      <ul className="mt-4 space-y-4">
-        {events.map((event) => (
-          <li key={event.name} className="rounded-lg border border-line bg-cream p-4">
-            <div className="flex flex-wrap items-baseline justify-between gap-2">
-              <h2 className="font-display text-2xl text-forest">{event.label}</h2>
-              <p className="text-lg text-ink">{event.seen ? formatCount(event.count) : "brak w raporcie"}</p>
-            </div>
-            {event.channels.length ? (
-              <ul className="mt-2 text-sm text-muted">
-                {event.channels.map((channel) => (
-                  <li key={channel.channel}>
-                    {channel.channel}: {formatCount(channel.count)}
-                  </li>
-                ))}
-              </ul>
-            ) : null}
-          </li>
-        ))}
-      </ul>
+      <p className="text-sm text-muted">{CONVERSION_NOTE}</p>
+      {events.length ? (
+        <ul className="mt-4 space-y-4">
+          {events.map((event) => (
+            <li key={event.name} className="rounded-lg border border-line bg-cream p-4">
+              <div className="flex flex-wrap items-baseline justify-between gap-2">
+                <h2 className="font-display text-2xl text-forest">{event.label}</h2>
+                <p className="text-lg text-ink">
+                  {event.name === "form_start"
+                    ? "to nie jest klient"
+                    : event.seen
+                      ? formatCount(event.count)
+                      : "brak w raporcie"}
+                </p>
+              </div>
+              {event.name === "form_start" && event.seen ? (
+                <p className="mt-1 text-sm text-muted">Kliknięć wysłania: {formatCount(event.count)}. Bez potwierdzenia dostawy.</p>
+              ) : null}
+              {event.channels.length ? (
+                <ul className="mt-2 text-sm text-muted">
+                  {event.channels.map((channel) => (
+                    <li key={channel.channel}>
+                      {channel.channel}: {formatCount(channel.count)}
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="mt-3 text-sm text-muted">Brak zdarzeń w tym zakresie. Zero nie zostało dopisane.</p>
+      )}
     </section>
   );
 }

@@ -1,16 +1,64 @@
 import { createServerFn } from "@tanstack/react-start";
+import type { ManagedEntry } from "./entries";
+import type { HerbCopy } from "./herb-editor";
 
 export type SiteEdits = {
   copy: Record<string, string>;
   images: Record<string, string>;
-  herbs: Record<string, unknown>;
+  herbs: Record<string, HerbCopy>;
+  entries: ManagedEntry[];
 };
 
-const empty = (): SiteEdits => ({ copy: {}, images: {}, herbs: {} });
+const empty = (): SiteEdits => ({ copy: {}, images: {}, herbs: {}, entries: [] });
 
 export const loadSiteEdits = createServerFn({ method: "GET" }).handler(async () => {
-  const { readEdits } = await import("./site-store.server");
-  return readEdits();
+  const { readPublicEdits } = await import("./site-store.server");
+  const doc = await readPublicEdits();
+  return {
+    copy: doc.copy,
+    images: doc.images,
+    herbs: doc.herbs as Record<string, HerbCopy>,
+    entries: doc.entries,
+  };
+});
+
+export const loadHerbPage = createServerFn({ method: "GET" })
+  .validator((data: { slug: string }) => ({ slug: (data?.slug ?? "").trim().slice(0, 80) }))
+  .handler(async ({ data }) => {
+    const { readPublicEdits } = await import("./site-store.server");
+    const { entryToHerb } = await import("./entries");
+    const { getHerb, herbs } = await import("./herbs");
+    const edits = await readPublicEdits();
+    const builtin = getHerb(data.slug);
+    let herb = builtin;
+    if (builtin) {
+      let next = builtin;
+      const over = edits.herbs[data.slug];
+      if (over && typeof over === "object") next = { ...builtin, ...(over as Partial<typeof builtin>) };
+      const image = edits.images[`img.herb.${data.slug}`];
+      if (image) next = { ...next, image };
+      herb = next;
+    } else {
+      const entry = edits.entries.find((item) => item.slug === data.slug);
+      herb = entry ? entryToHerb(entry) : undefined;
+    }
+    if (!herb) return null;
+    const pool = [...herbs, ...edits.entries.map(entryToHerb)];
+    const related = herb.related
+      .map((slug) => pool.find((item) => item.slug === slug))
+      .filter((item): item is NonNullable<typeof item> => Boolean(item));
+    return { herb, related };
+  });
+
+export const loadSitemapXml = createServerFn({ method: "GET" }).handler(async () => {
+  const { readPublicEdits } = await import("./site-store.server");
+  const { herbs } = await import("./herbs");
+  const { sitemapXml } = await import("./sitemap");
+  const edits = await readPublicEdits();
+  return sitemapXml({
+    herbs: herbs.map((herb) => herb.slug),
+    entries: edits.entries.map((entry) => ({ slug: entry.slug, updatedAt: entry.updatedAt })),
+  });
 });
 
 export const checkEditorPassword = createServerFn({ method: "POST" })
@@ -65,6 +113,44 @@ export const saveHerbFn = createServerFn({ method: "POST" })
     const { passwordOk, saveHerb } = await import("./site-store.server");
     if (!passwordOk(data.password)) return { ok: false as const };
     await saveHerb(data.slug, data.copy);
+    return { ok: true as const };
+  });
+
+export const listEntriesFn = createServerFn({ method: "POST" })
+  .validator((data: { password: string }) => ({ password: data.password ?? "" }))
+  .handler(async ({ data }) => {
+    const { passwordOk, readEdits } = await import("./site-store.server");
+    if (!passwordOk(data.password)) return { ok: false as const, entries: [] };
+    const doc = await readEdits();
+    return { ok: true as const, entries: doc.entries };
+  });
+
+export const saveEntryFn = createServerFn({ method: "POST" })
+  .validator((data: { password: string; previousSlug?: string; entry: unknown }) => {
+    const raw = JSON.stringify(data.entry ?? {});
+    if (raw.length > 120_000) throw new Error("Opis jest za długi.");
+    return {
+      password: data.password ?? "",
+      previousSlug: data.previousSlug?.trim() || "",
+      entry: data.entry,
+    };
+  })
+  .handler(async ({ data }) => {
+    const { passwordOk, saveEntry } = await import("./site-store.server");
+    if (!passwordOk(data.password)) return { ok: false as const, entry: null };
+    const entry = await saveEntry(data.entry, data.previousSlug || undefined);
+    return { ok: true as const, entry };
+  });
+
+export const deleteEntryFn = createServerFn({ method: "POST" })
+  .validator((data: { password: string; slug: string }) => ({
+    password: data.password ?? "",
+    slug: data.slug?.trim() ?? "",
+  }))
+  .handler(async ({ data }) => {
+    const { passwordOk, deleteEntry } = await import("./site-store.server");
+    if (!passwordOk(data.password)) return { ok: false as const };
+    await deleteEntry(data.slug);
     return { ok: true as const };
   });
 

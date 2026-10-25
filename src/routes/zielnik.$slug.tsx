@@ -4,16 +4,17 @@ import { HerbCopyEditor } from "@/components/HerbCopyEditor";
 import { JsonLd } from "@/components/JsonLd";
 import { SiteShell } from "@/components/SiteShell";
 import { Button } from "@/components/ui/button";
-import { getHerb, relatedHerbs, site } from "@/lib/content";
+import { site } from "@/lib/content";
 import { useMergedHerb } from "@/lib/herb-editor";
 import { breadcrumbJsonLd, herbArticleJsonLd, herbFaqJsonLd } from "@/lib/seo";
 import { createFileRoute, Link, notFound } from "@tanstack/react-router";
 
 export const Route = createFileRoute("/zielnik/$slug")({
-  loader: ({ params }) => {
-    const herb = getHerb(params.slug);
-    if (!herb) throw notFound();
-    return { herb, related: relatedHerbs(herb) };
+  loader: async ({ params }) => {
+    const { loadHerbPage } = await import("@/lib/site-api");
+    const page = await loadHerbPage({ data: { slug: params.slug } });
+    if (!page) throw notFound();
+    return page;
   },
   head: ({ loaderData }) => {
     const herb = loaderData?.herb;
@@ -25,13 +26,23 @@ export const Route = createFileRoute("/zielnik/$slug")({
         { name: "author", content: site.person },
         { property: "og:title", content: herb.seoTitle },
         { property: "og:description", content: herb.seoDescription },
-        { property: "og:image", content: `${site.url}${herb.image}` },
+        { property: "og:image", content: herb.image.startsWith("http") ? herb.image : `${site.url}${herb.image}` },
       ],
       links: [{ rel: "canonical", href: `${site.url}/zielnik/${herb.slug}` }],
     };
   },
   component: HerbPage,
 });
+
+function Prose({ title, text }: { title: string; text: string }) {
+  if (!text.trim()) return null;
+  return (
+    <section>
+      <h2 className="font-display text-3xl text-forest">{title}</h2>
+      <p className="mt-4 leading-relaxed text-muted">{text}</p>
+    </section>
+  );
+}
 
 function HerbPage() {
   const { herb: original, related } = Route.useLoaderData();
@@ -40,7 +51,7 @@ function HerbPage() {
   return (
     <SiteShell>
       <JsonLd data={herbArticleJsonLd(herb)} />
-      <JsonLd data={herbFaqJsonLd(herb)} />
+      {herb.faqs.length > 0 ? <JsonLd data={herbFaqJsonLd(herb)} /> : null}
       <JsonLd
         data={breadcrumbJsonLd([
           { name: "Start", url: site.url },
@@ -86,18 +97,24 @@ function HerbPage() {
             className="h-[420px] w-full rounded-lg object-cover"
           />
           <dl className="grid gap-6 sm:grid-cols-2">
-            <div>
-              <dt className="text-xs uppercase tracking-[0.16em] text-clay">Część rośliny</dt>
-              <dd className="mt-1 text-ink">{herb.part}</dd>
-            </div>
-            <div>
-              <dt className="text-xs uppercase tracking-[0.16em] text-clay">Sezon zbioru</dt>
-              <dd className="mt-1 text-ink">{herb.season}</dd>
-            </div>
-            <div className="sm:col-span-2">
-              <dt className="text-xs uppercase tracking-[0.16em] text-clay">Gdzie rośnie</dt>
-              <dd className="mt-1 text-ink">{herb.habitat}</dd>
-            </div>
+            {herb.part ? (
+              <div>
+                <dt className="text-xs uppercase tracking-[0.16em] text-clay">Część rośliny</dt>
+                <dd className="mt-1 text-ink">{herb.part}</dd>
+              </div>
+            ) : null}
+            {herb.season ? (
+              <div>
+                <dt className="text-xs uppercase tracking-[0.16em] text-clay">Sezon zbioru</dt>
+                <dd className="mt-1 text-ink">{herb.season}</dd>
+              </div>
+            ) : null}
+            {herb.habitat ? (
+              <div className="sm:col-span-2">
+                <dt className="text-xs uppercase tracking-[0.16em] text-clay">Gdzie rośnie</dt>
+                <dd className="mt-1 text-ink">{herb.habitat}</dd>
+              </div>
+            ) : null}
             <div className="sm:col-span-2 rounded-lg border border-line bg-cream p-5 text-sm leading-relaxed text-muted">
               Pisze{" "}
               <Link to="/o-mnie" className="text-forest underline">
@@ -113,38 +130,25 @@ function HerbPage() {
         </div>
 
         <div className="mx-auto mt-16 max-w-3xl space-y-12 px-4 sm:px-6">
-          <section>
-            <h2 className="font-display text-3xl text-forest">Jak rozpoznać</h2>
-            <p className="mt-4 leading-relaxed text-muted">{herb.recognize}</p>
-          </section>
-          <section>
-            <h2 className="font-display text-3xl text-forest">Sezon i zbiór</h2>
-            <p className="mt-4 leading-relaxed text-muted">{herb.harvest}</p>
-          </section>
-          <section>
-            <h2 className="font-display text-3xl text-forest">Napar i kuchnia</h2>
-            <p className="mt-4 leading-relaxed text-muted">{herb.prepare}</p>
-          </section>
-          <section>
-            <h2 className="font-display text-3xl text-forest">W tradycji</h2>
-            <p className="mt-4 leading-relaxed text-muted">{herb.tradition}</p>
-          </section>
-          <section>
-            <h2 className="font-display text-3xl text-forest">Ostrożność</h2>
-            <p className="mt-4 leading-relaxed text-muted">{herb.caution}</p>
-          </section>
+          <Prose title="Jak rozpoznać" text={herb.recognize} />
+          <Prose title="Sezon i zbiór" text={herb.harvest} />
+          <Prose title="Napar i kuchnia" text={herb.prepare} />
+          <Prose title="W tradycji" text={herb.tradition} />
+          <Prose title="Ostrożność" text={herb.caution} />
 
-          <section>
-            <h2 className="font-display text-3xl text-forest">Pytania</h2>
-            <dl className="mt-6 space-y-6">
-              {herb.faqs.map((item) => (
-                <div key={item.q} className="border-b border-line pb-6">
-                  <dt className="font-medium text-ink">{item.q}</dt>
-                  <dd className="mt-2 leading-relaxed text-muted">{item.a}</dd>
-                </div>
-              ))}
-            </dl>
-          </section>
+          {herb.faqs.length > 0 ? (
+            <section>
+              <h2 className="font-display text-3xl text-forest">Pytania</h2>
+              <dl className="mt-6 space-y-6">
+                {herb.faqs.map((item) => (
+                  <div key={item.q} className="border-b border-line pb-6">
+                    <dt className="font-medium text-ink">{item.q}</dt>
+                    <dd className="mt-2 leading-relaxed text-muted">{item.a}</dd>
+                  </div>
+                ))}
+              </dl>
+            </section>
+          ) : null}
         </div>
 
         {related.length > 0 ? (

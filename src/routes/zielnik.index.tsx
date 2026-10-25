@@ -3,8 +3,8 @@ import { HerbCard } from "@/components/HerbCard";
 import { JsonLd } from "@/components/JsonLd";
 import { PageIntro } from "@/components/PageIntro";
 import { SiteShell } from "@/components/SiteShell";
-import { herbs, site } from "@/lib/content";
-import { useMergedHerbs } from "@/lib/herb-editor";
+import { site } from "@/lib/content";
+import { useAllHerbs } from "@/lib/herb-editor";
 import { breadcrumbJsonLd, herbariumJsonLd } from "@/lib/seo";
 
 export const Route = createFileRoute("/zielnik/")({
@@ -24,10 +24,10 @@ export const Route = createFileRoute("/zielnik/")({
 });
 
 function HerbalPage() {
-  const list = useMergedHerbs();
+  const list = useAllHerbs();
   return (
     <SiteShell>
-      <JsonLd data={herbariumJsonLd()} />
+      <JsonLd data={herbariumJsonLd(list)} />
       <JsonLd
         data={breadcrumbJsonLd([
           { name: "Start", url: site.url },

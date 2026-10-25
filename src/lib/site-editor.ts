@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useEdits } from "./edits-context";
 
 const COPY_KEY = "zielarka.site-copy.v3";
 const MODE_KEY = "zielarka.edit-mode";
@@ -27,6 +28,11 @@ export function readEditorPassword() {
 
 export function writeEditorPassword(password: string) {
   sessionStorage.setItem(PASS_KEY, password);
+}
+
+export function clearEditorPassword() {
+  sessionStorage.removeItem(PASS_KEY);
+  writeEditMode(false);
 }
 
 export async function saveCopy(id: string, value: string) {
@@ -159,27 +165,35 @@ export function resizeImageFile(file: File, max = 1600): Promise<string> {
 }
 
 export function useCopy(id: string, fallback: string) {
-  const [value, setValue] = useState(fallback);
+  const remote = useEdits().copy[id];
+  const initial = remote ?? fallback;
+  const [value, setValue] = useState(initial);
   useEffect(() => {
-    const apply = () => setValue(getCopy(id, fallback));
+    const apply = () => {
+      const stored = readCopy();
+      if (Object.prototype.hasOwnProperty.call(stored, id)) setValue(stored[id]);
+      else setValue(remote ?? fallback);
+    };
     apply();
     window.addEventListener(EVENT, apply);
     return () => window.removeEventListener(EVENT, apply);
-  }, [id, fallback]);
+  }, [id, fallback, remote]);
   return value;
 }
 
 export function useLiveImage(id: string, fallback: string) {
-  const [src, setSrc] = useState(fallback);
+  const remote = useEdits().images[id];
+  const initial = remote || fallback;
+  const [src, setSrc] = useState(initial);
   useEffect(() => {
     let live = true;
     const apply = () => {
       getImage(id)
         .then((stored) => {
-          if (live) setSrc(stored || fallback);
+          if (live) setSrc(stored || remote || fallback);
         })
         .catch(() => {
-          if (live) setSrc(fallback);
+          if (live) setSrc(remote || fallback);
         });
     };
     apply();
@@ -188,7 +202,7 @@ export function useLiveImage(id: string, fallback: string) {
       live = false;
       window.removeEventListener(EVENT, apply);
     };
-  }, [id, fallback]);
+  }, [id, fallback, remote]);
   return src;
 }
 

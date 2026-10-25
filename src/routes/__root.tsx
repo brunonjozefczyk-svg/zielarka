@@ -1,6 +1,7 @@
 import { createRootRoute, HeadContent, Outlet, Scripts } from "@tanstack/react-router";
 import { AuthProvider } from "@/lib/auth/provider";
 import { PreviewHostBridge } from "@/components/preview-host-bridge";
+import { EditsProvider, type PublicEdits } from "@/lib/edits-context";
 import { Toaster } from "sonner";
 import appCss from "../styles.css?url";
 
@@ -9,6 +10,10 @@ const DESCRIPTION =
   "Sabina Józefczyk, zielarka-fitoterapeutka. Konsultacje 1:1, warsztaty, spacery i Klub Zielarski. Wiedza, tradycja i natura.";
 
 export const Route = createRootRoute({
+  loader: async (): Promise<{ edits: PublicEdits }> => {
+    const { loadSiteEdits } = await import("@/lib/site-api");
+    return { edits: await loadSiteEdits() };
+  },
   head: () => ({
     meta: [
       { charSet: "utf-8" },
@@ -30,16 +35,20 @@ export const Route = createRootRoute({
       { rel: "apple-touch-icon", href: "/apple-touch-icon.png" },
     ],
   }),
-  component: () => (
+  component: function Root() {
+    const { edits } = Route.useLoaderData();
+    return (
     <html lang="pl" className="antialiased" suppressHydrationWarning>
       <head>
         <HeadContent />
       </head>
       <body className="min-h-screen bg-paper text-ink font-sans">
         <PreviewHostBridge />
-        <AuthProvider>
-          <Outlet />
-        </AuthProvider>
+        <EditsProvider value={edits}>
+          <AuthProvider>
+            <Outlet />
+          </AuthProvider>
+        </EditsProvider>
         <Toaster
           position="bottom-center"
           toastOptions={{
@@ -50,5 +59,6 @@ export const Route = createRootRoute({
         <Scripts />
       </body>
     </html>
-  ),
+    );
+  },
 });

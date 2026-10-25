@@ -6,7 +6,7 @@ import { HerbCard } from "@/components/HerbCard";
 import { SiteShell } from "@/components/SiteShell";
 import { Button } from "@/components/ui/button";
 import { offers, site } from "@/lib/content";
-import { useMergedHerbs } from "@/lib/herb-editor";
+import { useAllHerbs } from "@/lib/herb-editor";
 import { useEditMode } from "@/lib/site-editor";
 import { homeJsonLd, metaFor } from "@/lib/seo";
 import { JsonLd } from "@/components/JsonLd";
@@ -31,7 +31,7 @@ export const Route = createFileRoute("/")({
 });
 
 function Home() {
-  const herbs = useMergedHerbs();
+  const herbs = useAllHerbs();
   const { editing } = useEditMode();
 
   return (

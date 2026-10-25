@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 import { herbs, type Herb, type HerbFaq } from "./herbs";
+import { entryToHerb } from "./entries";
+import { useEdits } from "./edits-context";
 
 const KEY = "zielarka.herb-copy.v2";
 
@@ -52,11 +54,11 @@ function writeAll(data: Record<string, HerbCopy>) {
   window.dispatchEvent(new Event("zielarka-herb-copy"));
 }
 
-export function applyRemoteHerbs(herbsCopy: Record<string, unknown>) {
+export function applyRemoteHerbs(herbsCopy: Record<string, HerbCopy>) {
   if (typeof window === "undefined") return;
   const current = readAll();
   for (const [slug, copy] of Object.entries(herbsCopy)) {
-    if (copy && typeof copy === "object") current[slug] = copy as HerbCopy;
+    if (copy && typeof copy === "object") current[slug] = copy;
   }
   writeAll(current);
 }
@@ -110,10 +112,7 @@ export function useMergedHerb(herb: Herb) {
   const [live, setLive] = useState(herb);
 
   useEffect(() => {
-    const apply = () => {
-      const base = herbs.find((item) => item.slug === herb.slug) ?? herb;
-      setLive(mergeHerb(base));
-    };
+    const apply = () => setLive(mergeHerb(herb));
     apply();
     window.addEventListener("zielarka-herb-copy", apply);
     window.addEventListener("storage", apply);
@@ -121,16 +120,40 @@ export function useMergedHerb(herb: Herb) {
       window.removeEventListener("zielarka-herb-copy", apply);
       window.removeEventListener("storage", apply);
     };
-  }, [herb.slug]);
+  }, [herb]);
 
   return live;
 }
 
+function overlayHerb(herb: Herb, remote: unknown, image?: string): Herb {
+  let next = herb;
+  if (remote && typeof remote === "object") {
+    const copy = remote as Partial<Herb>;
+    next = {
+      ...herb,
+      ...copy,
+      faqs: Array.isArray(copy.faqs) ? copy.faqs : herb.faqs,
+      related: Array.isArray(copy.related) ? copy.related : herb.related,
+    };
+  }
+  if (image) next = { ...next, image };
+  return next;
+}
+
 export function useMergedHerbs() {
-  const [list, setList] = useState(herbs);
+  const edits = useEdits();
+  const serverList = herbs.map((herb) =>
+    overlayHerb(herb, edits.herbs[herb.slug], edits.images[`img.herb.${herb.slug}`]),
+  );
+  const [list, setList] = useState(serverList);
 
   useEffect(() => {
-    const apply = () => setList(herbs.map(mergeHerb));
+    const apply = () =>
+      setList(
+        herbs.map((herb) =>
+          mergeHerb(overlayHerb(herb, edits.herbs[herb.slug], edits.images[`img.herb.${herb.slug}`])),
+        ),
+      );
     apply();
     window.addEventListener("zielarka-herb-copy", apply);
     window.addEventListener("storage", apply);
@@ -138,7 +161,14 @@ export function useMergedHerbs() {
       window.removeEventListener("zielarka-herb-copy", apply);
       window.removeEventListener("storage", apply);
     };
-  }, []);
+  }, [edits]);
 
   return list;
+}
+
+export function useAllHerbs() {
+  const extras = useEdits().entries.map(entryToHerb);
+  const base = useMergedHerbs();
+  const seen = new Set(base.map((herb) => herb.slug));
+  return [...base, ...extras.filter((herb) => !seen.has(herb.slug))];
 }

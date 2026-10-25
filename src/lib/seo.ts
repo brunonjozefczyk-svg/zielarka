@@ -54,24 +54,29 @@ export function personJsonLd() {
   };
 }
 
-export function herbariumJsonLd() {
+function absoluteImage(image: string) {
+  if (image.startsWith("https://") || image.startsWith("http://")) return image;
+  return `${site.url}${image.startsWith("/") ? image : `/${image}`}`;
+}
+
+export function herbariumJsonLd(list: Herb[] = herbs) {
   return {
     "@context": "https://schema.org",
     "@type": "CollectionPage",
     name: "Zielnik — rośliny w codzienności",
     description:
-      "Praktyczny zielnik: pokrzywa, rumianek, krwawnik, kwiat lipy, melisa i szałwia. Sezon, zbiór, napar i tradycja.",
+      "Praktyczny zielnik: sezon, zbiór, napar i tradycja. Opisy edukacyjne, nie porada medyczna.",
     url: `${site.url}/zielnik`,
     inLanguage: "pl-PL",
     author: personJsonLd(),
     isPartOf: { "@type": "WebSite", name: site.name, url: site.url },
     mainEntity: {
       "@type": "ItemList",
-      itemListElement: herbs.map((herb, index) => ({
+      itemListElement: list.map((herb, index) => ({
         "@type": "ListItem",
         position: index + 1,
         url: `${site.url}/zielnik/${herb.slug}`,
-        name: `${herb.name} (${herb.latin})`,
+        name: herb.latin && herb.latin !== "—" ? `${herb.name} (${herb.latin})` : herb.name,
       })),
     },
   };
@@ -83,7 +88,7 @@ export function herbArticleJsonLd(herb: Herb) {
     "@type": "Article",
     headline: `${herb.name} (${herb.latin}) w tradycji zielarskiej`,
     description: herb.seoDescription,
-    image: `${site.url}${herb.image}`,
+    image: absoluteImage(herb.image),
     inLanguage: "pl-PL",
     author: personJsonLd(),
     publisher: {

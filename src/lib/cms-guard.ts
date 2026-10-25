@@ -210,8 +210,39 @@ export function draftImageUrls(doc: { entries?: { status?: string; image?: strin
   return urls;
 }
 
-export function migrationAllowed(backupOk: boolean) {
-  return backupOk;
+export function migrationAllowed(backupOk: boolean, sealReady = false) {
+  return Boolean(backupOk && sealReady);
+}
+
+export type MigrationStep = { pathname: string; action: "reseal-plaintext" | "seal-draft-image" };
+
+/** Plan tylko do odczytu. Ta funkcja nigdy nie zapisuje i nie kasuje plików. */
+export function migrationPlan(
+  files: { pathname: string; json: unknown }[],
+  backupOk: boolean,
+  sealReady: boolean,
+): { run: false; ready: boolean; reason: string; steps: MigrationStep[] } {
+  if (!sealReady) {
+    return { run: false, ready: false, reason: "Brak CMS_SEAL_KEY. Migracja nie ruszy.", steps: [] };
+  }
+  if (!backupOk) {
+    return { run: false, ready: false, reason: "Najpierw potrzebna jest sprawdzona kopia. Migracja nie ruszy.", steps: [] };
+  }
+  const steps: MigrationStep[] = [];
+  for (const file of files) {
+    const kind = classifyLegacy(file.pathname, file.json);
+    if (kind === "plaintext-private") steps.push({ pathname: file.pathname, action: "reseal-plaintext" });
+    if (kind === "plaintext-private" || kind === "public") {
+      const urls = draftImageUrls(file.json as { entries?: { status?: string; image?: string }[] });
+      for (const url of urls) steps.push({ pathname: url, action: "seal-draft-image" });
+    }
+  }
+  return {
+    run: false,
+    ready: true,
+    reason: "Plan jest gotowy, ale nic nie zostało uruchomione. Stare pliki zostają do Twojej zgody.",
+    steps,
+  };
 }
 
 export const RESTORE_PHRASE = "PRZYWRÓĆ";

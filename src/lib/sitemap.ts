@@ -11,7 +11,11 @@ const PAGES: { path: string; changefreq: string; priority: string }[] = [
 ];
 
 function escapeXml(value: string) {
-  return value.replace(/&/g, "&").replace(/</g, "<").replace(/>/g, ">");
+  return value
+    .replace(/&/g, "\u0026amp;")
+    .replace(/</g, "\u0026lt;")
+    .replace(/>/g, "\u0026gt;")
+    .replace(/"/g, "\u0026quot;");
 }
 
 export function sitemapXml(opts: {

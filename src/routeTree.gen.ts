@@ -20,6 +20,7 @@ import { Route as WarsztatyRouteImport } from './routes/warsztaty'
 import { Route as ZielnikRouteImport } from './routes/zielnik'
 import { Route as ZielnikIndexRouteImport } from './routes/zielnik.index'
 import { Route as ZielnikSlugRouteImport } from './routes/zielnik.$slug'
+import { Route as ApiCronBackupRouteImport } from './routes/api.cron.backup'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -76,6 +77,11 @@ const ZielnikSlugRoute = ZielnikSlugRouteImport.update({
   path: '/$slug',
   getParentRoute: () => ZielnikRoute,
 } as any)
+const ApiCronBackupRoute = ApiCronBackupRouteImport.update({
+  id: '/api/cron/backup',
+  path: '/api/cron/backup',
+  getParentRoute: () => rootRouteImport,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
@@ -89,6 +95,7 @@ export interface FileRoutesByFullPath {
   '/zielnik': typeof ZielnikRouteWithChildren
   '/zielnik/$slug': typeof ZielnikSlugRoute
   '/zielnik/': typeof ZielnikIndexRoute
+  '/api/cron/backup': typeof ApiCronBackupRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -101,6 +108,7 @@ export interface FileRoutesByTo {
   '/warsztaty': typeof WarsztatyRoute
   '/zielnik/$slug': typeof ZielnikSlugRoute
   '/zielnik': typeof ZielnikIndexRoute
+  '/api/cron/backup': typeof ApiCronBackupRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -115,6 +123,7 @@ export interface FileRoutesById {
   '/zielnik': typeof ZielnikRouteWithChildren
   '/zielnik/$slug': typeof ZielnikSlugRoute
   '/zielnik/': typeof ZielnikIndexRoute
+  '/api/cron/backup': typeof ApiCronBackupRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -130,6 +139,7 @@ export interface FileRouteTypes {
     | '/zielnik'
     | '/zielnik/$slug'
     | '/zielnik/'
+    | '/api/cron/backup'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -142,6 +152,7 @@ export interface FileRouteTypes {
     | '/warsztaty'
     | '/zielnik/$slug'
     | '/zielnik'
+    | '/api/cron/backup'
   id:
     | '__root__'
     | '/'
@@ -155,6 +166,7 @@ export interface FileRouteTypes {
     | '/zielnik'
     | '/zielnik/$slug'
     | '/zielnik/'
+    | '/api/cron/backup'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -167,6 +179,7 @@ export interface RootRouteChildren {
   SitemapDotxmlRoute: typeof SitemapDotxmlRoute
   WarsztatyRoute: typeof WarsztatyRoute
   ZielnikRoute: typeof ZielnikRouteWithChildren
+  ApiCronBackupRoute: typeof ApiCronBackupRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -248,6 +261,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ZielnikSlugRouteImport
       parentRoute: typeof ZielnikRoute
     }
+    '/api/cron/backup': {
+      id: '/api/cron/backup'
+      path: '/api/cron/backup'
+      fullPath: '/api/cron/backup'
+      preLoaderRoute: typeof ApiCronBackupRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
@@ -274,6 +294,7 @@ const rootRouteChildren: RootRouteChildren = {
   SitemapDotxmlRoute: SitemapDotxmlRoute,
   WarsztatyRoute: WarsztatyRoute,
   ZielnikRoute: ZielnikRouteWithChildren,
+  ApiCronBackupRoute: ApiCronBackupRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

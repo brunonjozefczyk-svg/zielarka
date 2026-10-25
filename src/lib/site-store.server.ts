@@ -10,6 +10,7 @@ export type SiteEdits = {
 };
 
 const DOC = "zielarka/content.json";
+const DOCS = "zielarka/docs/";
 
 function empty(): SiteEdits {
   return { copy: {}, images: {}, herbs: {}, entries: [] };
@@ -44,7 +45,7 @@ async function blobPut(pathname: string, body: BodyInit, contentType: string) {
       "x-content-type": contentType,
       "x-add-random-suffix": "0",
       "x-allow-overwrite": "1",
-      "x-cache-control-max-age": contentType.startsWith("image/") ? "86400" : "0",
+      "x-cache-control-max-age": "86400",
     },
     body,
   });
@@ -66,6 +67,40 @@ async function blobHead(pathname: string) {
   return (await res.json()) as { url?: string };
 }
 
+type BlobMeta = { url?: string; pathname?: string; uploadedAt?: string | number };
+
+async function blobList(prefix: string) {
+  const key = token();
+  if (!key) throw new Error("Brak magazynu treści.");
+  const url = `https://vercel.com/api/blob/?${new URLSearchParams({ prefix, limit: "100" })}`;
+  const res = await fetch(url, {
+    headers: { authorization: `Bearer ${key}`, "x-api-version": BLOB_API },
+  });
+  if (!res.ok) throw new Error(`Odczyt nie powiódł się (${res.status}).`);
+  const data = (await res.json()) as { blobs?: BlobMeta[] };
+  return data.blobs ?? [];
+}
+
+async function blobDelete(urls: string[]) {
+  const key = token();
+  const clean = urls.filter((url) => url.includes("vercel-storage.com"));
+  if (!key || clean.length === 0) return;
+  await fetch("https://vercel.com/api/blob/delete", {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${key}`,
+      "x-api-version": BLOB_API,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ urls: clean }),
+  });
+}
+
+function blobStamp(blob: BlobMeta) {
+  const value = typeof blob.uploadedAt === "number" ? blob.uploadedAt : Date.parse(String(blob.uploadedAt ?? ""));
+  return Number.isFinite(value) ? value : 0;
+}
+
 function parseDoc(data: Partial<SiteEdits>): SiteEdits {
   return {
     copy: data.copy && typeof data.copy === "object" ? data.copy : {},
@@ -80,17 +115,26 @@ function parseDoc(data: Partial<SiteEdits>): SiteEdits {
   };
 }
 
+async function fetchDoc(url: string) {
+  const res = await fetch(url, { cache: "no-store" });
+  if (!res.ok) throw new Error(`Odczyt treści nie powiódł się (${res.status}).`);
+  return parseDoc((await res.json()) as Partial<SiteEdits>);
+}
+
 async function loadDoc(): Promise<SiteEdits> {
   if (cache && Date.now() - cache.at < 5000) return cache.data;
-  const meta = await blobHead(DOC);
-  if (!meta?.url) {
+  const docs = await blobList(DOCS);
+  const latest = docs
+    .filter((blob) => blob.url)
+    .sort((a, b) => blobStamp(b) - blobStamp(a) || String(b.pathname).localeCompare(String(a.pathname)))[0];
+  const legacy = latest ? null : await blobHead(DOC);
+  const url = latest?.url || legacy?.url;
+  if (!url) {
     const doc = empty();
     cache = { at: Date.now(), data: doc };
     return doc;
   }
-  const res = await fetch(meta.url, { cache: "no-store" });
-  if (!res.ok) throw new Error(`Odczyt treści nie powiódł się (${res.status}).`);
-  const doc = parseDoc((await res.json()) as Partial<SiteEdits>);
+  const doc = await fetchDoc(url);
   cache = { at: Date.now(), data: doc };
   return doc;
 }
@@ -122,8 +166,19 @@ export async function readPublicEdits(): Promise<SiteEdits> {
 
 async function writeEdits(doc: SiteEdits) {
   cache = null;
-  await blobPut(DOC, JSON.stringify(doc), "application/json");
+  const pathname = `${DOCS}${Date.now()}-${Math.random().toString(36).slice(2, 8)}.json`;
+  await blobPut(pathname, JSON.stringify(doc), "application/json");
   cache = { at: Date.now(), data: doc };
+  try {
+    const docs = await blobList(DOCS);
+    if (!docs.some((blob) => blob.pathname === pathname)) return;
+    const stale = docs.filter((blob) => blob.pathname !== pathname).map((blob) => blob.url || "");
+    const legacy = await blobHead(DOC);
+    if (legacy?.url) stale.push(legacy.url);
+    await blobDelete(stale);
+  } catch {
+    // Następny zapis sprzątnie starsze kopie. Bieżąca jest już zapisana.
+  }
 }
 
 export async function saveCopy(id: string, value: string) {
@@ -148,10 +203,12 @@ export async function saveImage(id: string, dataUrl: string) {
   if (!kind) throw new Error("To nie jest zdjęcie.");
   const safe = id.replace(/[^a-z0-9_-]/gi, "").slice(0, 80) || "obraz";
   const ext = kind === "image/png" ? "png" : kind === "image/webp" ? "webp" : "jpg";
-  const blob = await blobPut(`zielarka/images/${safe}.${ext}`, bytes, kind);
+  const blob = await blobPut(`zielarka/images/${safe}-${Date.now()}.${ext}`, bytes, kind);
   const doc = await readForWrite();
+  const previous = doc.images[id];
   doc.images[id] = blob.url;
   await writeEdits(doc);
+  if (previous && previous !== blob.url) await blobDelete([previous]);
   return blob.url;
 }
 

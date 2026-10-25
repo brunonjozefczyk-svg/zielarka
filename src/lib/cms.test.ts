@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import test from "node:test";
 import { listAllBlobs, newestRevisionPath, parseBlobListPage, urlsIfComplete } from "./blob-pages.ts";
-import { assertRevision, attemptBlocked, canonicalEdits, classifyLegacy, createAttemptLimiter, draftImageUrls, herbOutageAction, lockDecision, memWrite, migrationAllowed, migrationPlan, nextAttempt, publicFallback, restoreAllowed, toPublicDoc, urlsToPrune, urlsToRetain } from "./cms-guard.ts";
+import { assertRevision, attemptBlocked, canonicalEdits, classifyLegacy, createAttemptLimiter, draftImageUrls, expiredInboxUrls, herbOutageAction, lockDecision, memWrite, migrationAllowed, migrationPlan, nextAttempt, publicFallback, restoreAllowed, sameRevisionOrUnreadable, toPublicDoc, trustPublicPointer, urlsToPrune, urlsToRetain } from "./cms-guard.ts";
 import { openJson, payloadSha, resealJson, sealJson, sealWithEditorPassword } from "./draft-seal.server.ts";
 import { normalizeEntry, plainText, slugify, uniqueSlug } from "./entries.ts";
 import { sitemapXml } from "./sitemap.ts";
@@ -174,6 +174,22 @@ test("dwa równoczesne zapisy i przerwany zapis", () => {
     "ponowne-public",
   );
   assert.equal(retry.ok, true);
+  const damaged = memWrite(
+    { lock: null, privateRev: 9, publicRev: 9, privateBody: "zepsute", publicBody: "zepsute" },
+    4,
+    "od zera",
+    "od zera public",
+    undefined,
+    true,
+  );
+  assert.equal(damaged.ok, true);
+  const newer = memWrite(
+    { lock: null, privateRev: 9, publicRev: 9, privateBody: "nowe", publicBody: "nowe" },
+    4,
+    "stare",
+    "stare public",
+  );
+  assert.equal(newer.ok, false);
 });
 
 test("retencja nie kasuje jedynej ani najnowszej kopii", () => {
@@ -261,7 +277,7 @@ test("zła czcionka odpada, a puste rozmiary nie zmieniają strony", () => {
   assert.equal(String(css?.fontFamily).includes("color"), false);
 });
 
-test("lista magazynu przechodzi strony 50, 100, 101, 500 i 1000", async () => {
+test("lista magazynu przechodzi strony 50, 100, 101, 500, 1000, 1001 i 1500", async () => {
   async function all(count: number, pageSize: number) {
     const items = Array.from({ length: count }, (_, index) => ({
       pathname: `zielarka/journal/private/${String(index + 1).padStart(8, "0")}.json`,
@@ -280,8 +296,9 @@ test("lista magazynu przechodzi strony 50, 100, 101, 500 i 1000", async () => {
     }
     return items;
   }
-  for (const count of [50, 100, 101, 500, 1000]) await all(count, 100);
+  for (const count of [50, 100, 101, 500, 1000, 1001, 1500]) await all(count, 100);
   await all(1000, 1000);
+  await all(1001, 1000);
   assert.equal(parseBlobListPage({ blobs: [], hasMore: true }).ok, false);
   assert.equal(parseBlobListPage({ blobs: [], hasMore: false }).ok, true);
   await assert.rejects(
@@ -328,6 +345,18 @@ test("rotacja klucza k1 na k2 nie zamyka starej kopii", () => {
     delete process.env.CMS_SEAL_KEYS;
     assert.throws(() => openJson(JSON.parse(sealedA)), /Brak klucza k1/);
     assert.equal((openJson(JSON.parse(sealedB)) as { lead: string }).lead, secretB);
+    const key3 = randomBytes(32).toString("base64");
+    process.env.CMS_SEAL_KEY = `k3:${key3}`;
+    process.env.CMS_SEAL_KEYS = `k1:${key1},k2:${key2}`;
+    const sealedC = sealJson(JSON.stringify({ lead: "dokument C" }));
+    assert.equal(JSON.parse(sealedC).kid, "k3");
+    assert.equal((openJson(JSON.parse(sealedA)) as { lead: string }).lead, secretA);
+    assert.equal((openJson(JSON.parse(sealedB)) as { lead: string }).lead, secretB);
+    assert.equal((openJson(JSON.parse(sealedC)) as { lead: string }).lead, "dokument C");
+    delete process.env.CMS_SEAL_KEYS;
+    assert.throws(() => openJson(JSON.parse(sealedA)), /Brak klucza k1/);
+    assert.throws(() => openJson(JSON.parse(sealedB)), /Brak klucza k2/);
+    assert.equal((openJson(JSON.parse(sealedC)) as { lead: string }).lead, "dokument C");
     process.env.CMS_SEAL_KEY = key2;
     process.env.CMS_SEAL_KEYS = `k1:${key1}`;
     assert.throws(() => sealJson("{}"), /dwa różne klucze/);
@@ -340,4 +369,29 @@ test("rotacja klucza k1 na k2 nie zamyka starej kopii", () => {
     if (previousPassword === undefined) delete process.env.EDITOR_PASSWORD;
     else process.env.EDITOR_PASSWORD = previousPassword;
   }
+});
+
+test("wskaźnik publiczny, konflikt zapisu i stare wgrywanie", () => {
+  assert.equal(trustPublicPointer(4, false), true);
+  assert.equal(trustPublicPointer(4, true), false);
+  assert.equal(trustPublicPointer(1.5, false), false);
+  assert.equal(sameRevisionOrUnreadable(null, 3, true), "proceed");
+  assert.equal(sameRevisionOrUnreadable(3, 3, false), "proceed");
+  assert.equal(sameRevisionOrUnreadable(8, 3, false), "conflict");
+  const now = Date.parse("2026-10-25T12:00:00.000Z");
+  const active = "a".repeat(32);
+  const old = "b".repeat(32);
+  const fresh = "c".repeat(32);
+  const urls = expiredInboxUrls(
+    [
+      { pathname: `zielarka/restore-inbox/${old}/manifest.json`, url: "https://blob.vercel-storage.com/old", uploadedAt: now - 49 * 60 * 60 * 1000 },
+      { pathname: `zielarka/restore-inbox/${active}/manifest.json`, url: "https://blob.vercel-storage.com/active", uploadedAt: now - 72 * 60 * 60 * 1000 },
+      { pathname: `zielarka/restore-inbox/${fresh}/1.json`, url: "https://blob.vercel-storage.com/fresh", uploadedAt: now - 60 * 1000 },
+      { pathname: `zielarka/restore-inbox/${"d".repeat(32)}/x.json`, url: "https://blob.vercel-storage.com/nodate", uploadedAt: 0 },
+      { pathname: "zielarka/backups/manual/1.json", url: "https://blob.vercel-storage.com/backup", uploadedAt: 1 },
+    ],
+    now,
+    active,
+  );
+  assert.deepEqual(urls, ["https://blob.vercel-storage.com/old"]);
 });

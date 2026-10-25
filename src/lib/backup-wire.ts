@@ -25,3 +25,15 @@ export function isSealedArchive(value: unknown): value is SealedArchive {
     row.sealedParts.every((part) => typeof part === "string")
   );
 }
+
+/** Nigdy nie wysyła bajtów. Cel w zmiennej środowiska też nie włącza wysyłki. */
+export function offsiteDecision(destination = ""): { automatic: false; sent: false; reason: string } {
+  if (destination.trim()) {
+    return {
+      automatic: false,
+      sent: false,
+      reason: "Cel poza Vercel Blob jest wpisany, ale wysyłka nie jest włączona. Nic nie zostało wysłane.",
+    };
+  }
+  return { automatic: false, sent: false, reason: OFFSITE_NOTE };
+}

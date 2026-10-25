@@ -4,10 +4,13 @@ import test from "node:test";
 import {
   attachManifestParts,
   buildPayload,
+  confirmBackupRoundtrip,
   dropProtected,
   fileFromBytes,
+  imageGoesToPrivateStore,
   isBlankDoc,
   joinSliceText,
+  planBackupRetention,
   plannedRefs,
   recoverBackup,
   restoreGate,
@@ -21,7 +24,7 @@ import {
   type BackupDoc,
   type BackupFile,
 } from "./backup-bundle.ts";
-import { OFFSITE_AUTOMATIC } from "./backup-wire.ts";
+import { OFFSITE_AUTOMATIC, offsiteDecision } from "./backup-wire.ts";
 import { openJson, sealJson } from "./draft-seal.server.ts";
 import { parseStoredEntry } from "./entries.ts";
 
@@ -411,4 +414,121 @@ test("kopia większa niż 4 MB wraca ze zdjęciami, a brak części nic nie zapi
     if (previous === undefined) delete process.env.CMS_SEAL_KEY;
     else process.env.CMS_SEAL_KEY = previous;
   }
+});
+
+function hexSha(char: string) {
+  return char.repeat(64);
+}
+
+test("chroniona stara kopia zatrzymuje manifest i części zdjęć", () => {
+  const manifests = Array.from({ length: 20 }, (_, index) => ({
+    pathname: `zielarka/backups/manual/new-${index}.json`,
+    url: `https://blob.vercel-storage.com/new-${index}`,
+    uploadedAt: 1_000_000 + index,
+    shas: [hexSha("b")],
+  }));
+  const oldSha = hexSha("a");
+  const doomedSha = hexSha("c");
+  const sharedSha = hexSha("d");
+  manifests.push(
+    {
+      pathname: "zielarka/backups/manual/old.json",
+      url: "https://blob.vercel-storage.com/old",
+      uploadedAt: 10,
+      shas: [oldSha, sharedSha],
+    },
+    {
+      pathname: "zielarka/backups/manual/doomed.json",
+      url: "https://blob.vercel-storage.com/doomed",
+      uploadedAt: 20,
+      shas: [doomedSha, sharedSha],
+    },
+  );
+  const parts = [
+    { url: "https://blob.vercel-storage.com/part-old", downloadUrl: "https://blob.vercel-storage.com/part-old-dl", sha256: oldSha },
+    { url: "https://blob.vercel-storage.com/part-doomed", downloadUrl: "https://blob.vercel-storage.com/part-doomed-dl", sha256: doomedSha },
+    { url: "https://blob.vercel-storage.com/part-shared", sha256: sharedSha },
+    { url: "https://blob.vercel-storage.com/part-new", sha256: hexSha("b") },
+  ];
+  const bare = planBackupRetention({ manifests, parts, protectPathnames: [] });
+  assert.equal(bare.deleteUrls.includes("https://blob.vercel-storage.com/old"), true);
+  assert.equal(bare.deleteUrls.includes("https://blob.vercel-storage.com/part-old"), true);
+  const plan = planBackupRetention({
+    manifests,
+    parts,
+    protectPathnames: ["zielarka/backups/manual/old.json"],
+  });
+  assert.equal(plan.deleteUrls.includes("https://blob.vercel-storage.com/old"), false);
+  assert.equal(plan.deleteUrls.includes("https://blob.vercel-storage.com/part-old"), false);
+  assert.equal(plan.deleteUrls.includes("https://blob.vercel-storage.com/part-old-dl"), false);
+  assert.equal(plan.deleteUrls.includes("https://blob.vercel-storage.com/part-shared"), false);
+  assert.equal(plan.deleteUrls.includes("https://blob.vercel-storage.com/part-new"), false);
+  assert.equal(plan.deleteUrls.includes("https://blob.vercel-storage.com/doomed"), true);
+  assert.equal(plan.deleteUrls.includes("https://blob.vercel-storage.com/part-doomed"), true);
+  assert.equal(plan.deleteUrls.includes("https://blob.vercel-storage.com/part-doomed-dl"), true);
+  assert.throws(
+    () => planBackupRetention({ manifests, parts, protectPathnames: ["zielarka/backups/manual/brak.json"] }),
+    /Nic nie zostało skasowane/,
+  );
+  const broken = manifests.map((item) => (item.pathname.endsWith("old.json") ? { ...item, shas: ["nie-sha"] } : item));
+  assert.throws(
+    () => planBackupRetention({ manifests: broken, parts, protectPathnames: ["zielarka/backups/manual/old.json"] }),
+    /Przycinanie zostało zatrzymane/,
+  );
+});
+
+test("potwierdzona kopia odtwarza szkic, SEO i czcionki", () => {
+  const doc = docWith("https://cdn.example/a.png", "seal:draft");
+  doc.copy["seo.title"] = "Mięta pieprzowa";
+  doc.theme = { display: "Source Serif 4" };
+  doc.styles = { h1: { font: "Source Serif 4", size: "2rem" } };
+  doc.entries[0] = { ...doc.entries[0], description: "Opis do Google" };
+  const draftBytes = Buffer.from(PNG);
+  draftBytes[draftBytes.length - 1] ^= 0xff;
+  const files = plannedRefs(doc).map((plan) => {
+    const file = fileFromBytes(plan.ref, plan.use, plan.use === "draft" ? draftBytes : PNG);
+    assert.ok(file);
+    return file;
+  });
+  const payload = buildPayload("sprawdzenie", "2026-10-25T00:00:00.000Z", doc, files);
+  const manifest = toManifest(payload);
+  const bins = manifest.files.map((file) => {
+    const source = files.find((item) => item.sha256 === file.sha256 && item.ref === file.ref);
+    assert.ok(source);
+    return { sha256: file.sha256, base64: source.base64 };
+  });
+  const confirmed = confirmBackupRoundtrip(payload, manifest, bins);
+  assert.equal(confirmed.ok, true);
+  if (!confirmed.ok) return;
+  assert.equal(confirmed.payload.doc.entries.find((entry) => entry.slug === "szkic")?.status, "draft");
+  assert.equal(confirmed.payload.doc.entries.find((entry) => entry.slug === "mieta")?.status, "published");
+  assert.equal(confirmed.payload.doc.copy["seo.title"], "Mięta pieprzowa");
+  assert.equal((confirmed.payload.doc.theme as { display?: string }).display, "Source Serif 4");
+  assert.equal(confirmBackupRoundtrip(payload, manifest, bins.slice(0, 1)).ok, false);
+  const flipped = bins.map((bin, index) => (index === 0 ? { ...bin, base64: Buffer.from("nieobraz").toString("base64") } : bin));
+  assert.equal(confirmBackupRoundtrip(payload, manifest, flipped).ok, false);
+  const duplicated = { ...manifest, files: manifest.files[0] ? [...manifest.files, manifest.files[0]] : manifest.files };
+  assert.equal(confirmBackupRoundtrip(payload, duplicated, bins).ok, false);
+});
+
+test("powtórzona albo brakująca część nie składa zdjęcia", () => {
+  const raw = Buffer.from("aaabbb");
+  const parts = [
+    { slice: 0, slices: 2, base64: raw.subarray(0, 3).toString("base64") },
+    { slice: 1, slices: 2, base64: raw.subarray(3, 6).toString("base64") },
+  ];
+  assert.equal(Buffer.from(joinSliceText([parts[1]!, parts[0]!]), "base64").equals(raw), true);
+  assert.throws(() => joinSliceText([parts[0]!, { ...parts[0]! }]), /powtórzona część/);
+  assert.throws(() => joinSliceText([parts[0]!]), /brakuje części/);
+});
+
+test("wysyłka poza Blob pozostaje wyłączona", () => {
+  assert.equal(OFFSITE_AUTOMATIC, false);
+  const named = offsiteDecision("https://example.r2.cloudflarestorage.com/kopie");
+  assert.equal(named.sent, false);
+  assert.equal(named.automatic, false);
+  assert.match(named.reason, /Nic nie zostało wysłane/);
+  assert.equal(offsiteDecision("").sent, false);
+  assert.equal(imageGoesToPrivateStore("draft"), true);
+  assert.equal(imageGoesToPrivateStore("public"), false);
 });

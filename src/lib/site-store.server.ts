@@ -6,14 +6,15 @@ import {
   attemptBlocked,
   canonicalEdits,
   createAttemptLimiter,
+  expiredInboxUrls,
   nextAttempt,
+  sameRevisionOrUnreadable,
   toPublicDoc,
+  trustPublicPointer,
   urlsToPrune,
-  urlsToRetain,
   lockDecision,
   publicFallback,
   type AttemptRow,
-  type KeptBlob,
   type StampBlob,
 } from "./cms-guard";
 import { BLOB_PAGE_LIMIT, listAllBlobs } from "./blob-pages";
@@ -22,10 +23,12 @@ import {
   attachManifestParts,
   buildPayload,
   bundledAsset,
-  dropProtected,
+  confirmBackupRoundtrip,
   fileFromBytes,
+  imageGoesToPrivateStore,
   joinSliceText,
   parseDataUrl,
+  planBackupRetention,
   plannedRefs,
   recoverBackup,
   sliceBytes,
@@ -38,6 +41,7 @@ import {
   type BackupFile,
   type BackupManifest,
 } from "./backup-bundle";
+import { offsiteDecision } from "./backup-wire";
 import { sanitizeStyle, sanitizeStyles, sanitizeTheme, type TextStyle, type ThemeSettings } from "./theme";
 
 export type SiteEdits = {
@@ -59,6 +63,7 @@ const LOCKS = "zielarka/locks/";
 const AUTH = "zielarka/auth/";
 const JOURNAL_PUBLIC = "zielarka/journal/public/";
 const JOURNAL_PRIVATE = "zielarka/journal/private/";
+const PUBLIC_CURRENT = "zielarka/journal/public/current.json";
 const BACKUPS = "zielarka/backups/";
 const PARTS = "zielarka/backups/parts/";
 const INBOX = "zielarka/restore-inbox/";
@@ -192,15 +197,25 @@ async function blobDelete(urls: string[]) {
   const key = token();
   const clean = [...new Set(urls.filter((url) => url.includes("vercel-storage.com")))];
   if (!key || clean.length === 0) return;
-  await fetch("https://vercel.com/api/blob/delete", {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${key}`,
-      "x-api-version": BLOB_API,
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({ urls: clean }),
-  });
+  let res: Response;
+  try {
+    res = await fetch("https://vercel.com/api/blob/delete", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${key}`,
+        "x-api-version": BLOB_API,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ urls: clean }),
+    });
+  } catch {
+    console.error("Kasowanie w magazynie nie powiodło się (sieć).");
+    throw new Error("Kasowanie w magazynie nie powiodło się. Nic więcej nie zostało skasowane.");
+  }
+  if (!res.ok) {
+    console.error(`Kasowanie w magazynie nie powiodło się (${res.status}).`);
+    throw new Error(`Kasowanie w magazynie nie powiodło się (${res.status}).`);
+  }
 }
 
 function blobStamp(blob: BlobMeta) {
@@ -210,6 +225,10 @@ function blobStamp(blob: BlobMeta) {
 
 function readUrl(blob: BlobMeta) {
   return blob.downloadUrl || blob.url || "";
+}
+
+function isNumberedJournal(pathname: string) {
+  return /\/\d+\.json$/.test(pathname);
 }
 
 function newest(blobs: BlobMeta[]) {
@@ -273,7 +292,7 @@ async function fetchDoc(url: string) {
 
 function highestRevision(blobs: BlobMeta[]) {
   return blobs
-    .filter((blob) => blob.pathname && readUrl(blob))
+    .filter((blob) => blob.pathname && isNumberedJournal(blob.pathname) && readUrl(blob))
     .sort((a, b) => revisionFromPath(String(b.pathname)) - revisionFromPath(String(a.pathname)))[0];
 }
 
@@ -327,7 +346,7 @@ async function loadLegacy(): Promise<SiteEdits | null> {
 async function loadPrivateFresh(): Promise<SiteEdits> {
   let saw = false;
   const journals = (await blobList(JOURNAL_PRIVATE))
-    .filter((blob) => blob.pathname && readUrl(blob))
+    .filter((blob) => blob.pathname && isNumberedJournal(blob.pathname) && readUrl(blob))
     .sort((a, b) => revisionFromPath(String(b.pathname)) - revisionFromPath(String(a.pathname)));
   for (const blob of journals) {
     saw = true;
@@ -357,11 +376,40 @@ async function loadPrivateFresh(): Promise<SiteEdits> {
   return empty();
 }
 
+async function readPublicPointer(): Promise<SiteEdits | null> {
+  try {
+    const head = await blobHead(PUBLIC_CURRENT);
+    if (!head || !readUrl(head)) return null;
+    const pointer = (await fetchJson(readUrl(head))) as { revision?: unknown; url?: unknown };
+    if (typeof pointer.revision !== "number" || typeof pointer.url !== "string" || !pointer.url) return null;
+    const next = await blobHead(`${JOURNAL_PUBLIC}${padRevision(pointer.revision + 1)}.json`);
+    if (!trustPublicPointer(pointer.revision, Boolean(next && readUrl(next)))) return null;
+    const doc = toPublicDoc(await fetchDoc(pointer.url));
+    if (doc.revision !== pointer.revision) return null;
+    return doc;
+  } catch {
+    return null;
+  }
+}
+
+async function writePublicPointer(revision: number, url: string, sha: string) {
+  try {
+    await blobPut(PUBLIC_CURRENT, JSON.stringify({ revision, url, sha }), "application/json");
+  } catch {
+    // Pełna lista dziennika i tak znajdzie ten zapis, bo plik następnej wersji już istnieje albo wskaźnik jest stary.
+  }
+}
+
 async function loadPublic(): Promise<SiteEdits> {
   if (publicCache && Date.now() - publicCache.at < PUBLIC_CACHE_MS) return publicCache.data;
   try {
+    const fast = await readPublicPointer();
+    if (fast) {
+      publicCache = { at: Date.now(), data: fast };
+      return fast;
+    }
     const journals = (await blobList(JOURNAL_PUBLIC))
-      .filter((blob) => blob.pathname && readUrl(blob))
+      .filter((blob) => blob.pathname && isNumberedJournal(blob.pathname) && readUrl(blob))
       .sort((a, b) => revisionFromPath(String(b.pathname)) - revisionFromPath(String(a.pathname)));
     for (const blob of journals) {
       try {
@@ -484,6 +532,16 @@ async function writeEdits(doc: SiteEdits, afterPrivate?: (written: SiteEdits) =>
   let privateUrl = "";
   let publicUrl = "";
   try {
+    let freshRevision: number | null = null;
+    let unreadable = false;
+    try {
+      freshRevision = (await loadPrivateFresh()).revision;
+    } catch {
+      unreadable = true;
+    }
+    if (sameRevisionOrUnreadable(freshRevision, doc.revision, unreadable) === "conflict") {
+      throw new Error("Ktoś zapisał w międzyczasie. Odśwież stronę.");
+    }
     privateUrl = (await blobPut(privatePath, sealJson(privateStamp.text), "application/json")).url;
     const check = await fetchDoc(privateUrl);
     if (check.revision !== next.revision) throw new Error("Kopia prywatna nie zgadza się.");
@@ -501,6 +559,7 @@ async function writeEdits(doc: SiteEdits, afterPrivate?: (written: SiteEdits) =>
       JSON.stringify({ revision: next.revision, url: publicUrl, sha: publicStamp.sha }),
       "application/json",
     );
+    await writePublicPointer(next.revision, publicUrl, publicStamp.sha);
     publicCache = { at: Date.now(), data: published };
   } catch (error) {
     if (lockUrl) await blobDelete([lockUrl]);
@@ -664,7 +723,7 @@ export async function restorePrevious(expectedRevision: number) {
   const current = await readForWrite();
   assertRevision(current.revision, expectedRevision);
   const journals = (await blobList(JOURNAL_PRIVATE))
-    .filter((blob) => blob.pathname && readUrl(blob))
+    .filter((blob) => blob.pathname && isNumberedJournal(blob.pathname) && readUrl(blob))
     .sort((a, b) => revisionFromPath(String(b.pathname)) - revisionFromPath(String(a.pathname)));
   const previous = journals[1];
   if (previous) {
@@ -697,6 +756,7 @@ async function healPublic() {
     JSON.stringify({ revision: doc.revision, url: saved.url, sha: stamp.sha }),
     "application/json",
   );
+  await writePublicPointer(doc.revision, saved.url, stamp.sha);
   publicCache = { at: Date.now(), data: published };
 }
 
@@ -769,7 +829,7 @@ export async function listBackupRows() {
   const journals = await blobList(JOURNAL_PRIVATE);
   for (const blob of journals) {
     const pathname = blob.pathname || "";
-    if (!pathname) continue;
+    if (!pathname || !isNumberedJournal(pathname)) continue;
     rows.push({
       id: pathname,
       at: new Date(blobStamp(blob) || Date.now()).toISOString(),
@@ -834,8 +894,10 @@ async function putBackupImage(file: BackupFile) {
   const bytes = Buffer.from(file.base64, "base64");
   const made = fileFromBytes(file.ref, file.use, bytes);
   if (!made || made.sha256 !== file.sha256) throw new Error("Plik zdjęcia nie zgadza się z manifestem.");
-  if (file.use === "draft") {
-    return storeSealedImage(`restore-${file.sha256.slice(0, 12)}`, `data:${file.mime};base64,${file.base64}`);
+  if (imageGoesToPrivateStore(file.use)) {
+    const ref = await storeSealedImage(`restore-${file.sha256.slice(0, 12)}`, `data:${file.mime};base64,${file.base64}`);
+    if (!ref.startsWith("seal:")) throw new Error("Zdjęcie szkicu wyszło poza prywatny magazyn. Strona nie została podmieniona.");
+    return ref;
   }
   const ext = file.mime === "image/png" ? "png" : file.mime === "image/webp" ? "webp" : "jpg";
   const blob = await blobPut(`zielarka/images/restore-${file.sha256.slice(0, 16)}.${ext}`, bytes, file.mime);
@@ -939,40 +1001,63 @@ async function referencedShas(blob: BlobMeta) {
   if (!url) throw new Error("Nie da się odczytać zachowanej kopii. Przycinanie zostało zatrzymane.");
   const opened = await readSealed(url);
   if (!opened || typeof opened !== "object") throw new Error("Nie da się odczytać zachowanej kopii. Przycinanie zostało zatrzymane.");
-  const files = (opened as { files?: { sha256?: string }[] }).files;
-  if (!Array.isArray(files)) return [] as string[];
-  return files.flatMap((file) => (typeof file.sha256 === "string" ? [file.sha256] : []));
+  const record = opened as { format?: unknown; files?: { sha256?: unknown }[] };
+  if (!Array.isArray(record.files)) {
+    if (record.format === 3) throw new Error("Nie da się odczytać zachowanej kopii. Przycinanie zostało zatrzymane.");
+    return [] as string[];
+  }
+  const shas: string[] = [];
+  for (const file of record.files) {
+    if (typeof file.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(file.sha256)) {
+      throw new Error("Nie da się odczytać zachowanej kopii. Przycinanie zostało zatrzymane.");
+    }
+    shas.push(file.sha256);
+  }
+  return shas;
+}
+
+async function pruneInbox(activeSession = "") {
+  const blobs = await blobList(INBOX);
+  const urls = expiredInboxUrls(
+    blobs.map((blob) => ({
+      pathname: blob.pathname || "",
+      url: blob.url || blob.downloadUrl || "",
+      uploadedAt: blobStamp(blob),
+    })),
+    Date.now(),
+    activeSession,
+  );
+  await blobDelete(urls);
 }
 
 async function pruneBackups(protect: string[]) {
   const blobs = await blobList(BACKUPS);
   const manifests = blobs.filter((blob) => {
     const pathname = blob.pathname || "";
-    return pathname && !pathname.includes("/parts/") && !pathname.endsWith("status.json");
+    return pathname && !pathname.includes("/parts/") && !pathname.endsWith("status.json") && !pathname.endsWith("/current.json");
   });
-  const kept: KeptBlob[] = manifests.flatMap((blob) => {
-    const pathname = blob.pathname || "";
-    const url = blob.url || "";
-    if (!pathname || !url) return [];
-    return [{ pathname, url, uploadedAt: blobStamp(blob), revision: blobStamp(blob) }];
-  });
-  const removeUrls = new Set(urlsToRetain(kept));
-  const keepBlobs = manifests.filter((blob) => !removeUrls.has(blob.url || ""));
-  const referenced = new Set<string>();
-  for (const blob of keepBlobs) {
-    for (const sha of await referencedShas(blob)) referenced.add(sha);
+  const protectPaths = [...new Set(protect.filter(Boolean))];
+  for (const path of protectPaths) {
+    if (!manifests.some((blob) => blob.pathname === path)) {
+      throw new Error("Chroniona kopia nie jest na kompletnej liście. Nic nie zostało skasowane.");
+    }
   }
-  const partDeletes = blobs.flatMap((blob) => {
-    const pathname = blob.pathname || "";
-    const match = /\/parts\/([a-f0-9]{64})\//.exec(pathname);
-    if (!match?.[1] || referenced.has(match[1])) return [];
-    return [blob.url || "", blob.downloadUrl || ""];
+  const described = [];
+  for (const blob of manifests) {
+    described.push({
+      pathname: blob.pathname || "",
+      url: blob.url || "",
+      uploadedAt: blobStamp(blob),
+      shas: await referencedShas(blob),
+    });
+  }
+  const parts = blobs.flatMap((blob) => {
+    const match = /\/parts\/([a-f0-9]{64})\//.exec(blob.pathname || "");
+    if (!match?.[1]) return [];
+    return [{ url: blob.url || "", downloadUrl: blob.downloadUrl || "", sha256: match[1] }];
   });
-  const protectUrls = blobs.flatMap((blob) => {
-    if (!protect.includes(blob.pathname || "")) return [];
-    return [blob.url || "", blob.downloadUrl || ""];
-  });
-  await blobDelete(dropProtected([...removeUrls, ...partDeletes], protectUrls));
+  const plan = planBackupRetention({ manifests: described, parts, protectPathnames: protectPaths });
+  await blobDelete(plan.deleteUrls);
 }
 
 async function readBackupRaw(id: string) {
@@ -1053,18 +1138,34 @@ export async function createVerifiedBackup(kind: "manual" | "daily" | "monthly",
   if (!opened?.docSha || opened.docSha !== payload.docSha || opened.format !== 3) {
     throw new Error("Kopia nie przeszła sprawdzenia. Nic nie zostało podmienione.");
   }
+  const bins: { sha256: string; base64: string }[] = [];
   for (const file of opened.files || []) {
-    const base64 = await readFileParts(file.sha256, file.slices);
-    if (sha256Bytes(Buffer.from(base64, "base64")) !== file.sha256) {
-      throw new Error("Kopia nie przeszła sprawdzenia. Nic nie zostało podmienione.");
-    }
+    bins.push({ sha256: file.sha256, base64: await readFileParts(file.sha256, file.slices) });
   }
-  const status = { ok: true, at, revision: doc.revision, kind, sha: payload.docSha, images: files.length };
+  const confirmed = confirmBackupRoundtrip(payload, opened, bins);
+  if (!confirmed.ok) throw new Error(confirmed.error);
+  const offsite = offsiteDecision(process.env.ZIELARKA_OFFSITE || "");
+  if (offsite.sent) throw new Error("Wysyłka poza magazyn jest wyłączona. Kopia nie została oznaczona jako dobra.");
+  const status = {
+    ok: true,
+    checked: true,
+    at,
+    revision: doc.revision,
+    kind,
+    sha: payload.docSha,
+    images: files.length,
+    offsite: false as const,
+  };
   await blobPut(`${BACKUPS}status.json`, JSON.stringify(status), "application/json");
   try {
     await pruneBackups(protect);
-  } catch {
-    // Przycinanie kopii nie rusza świeżo sprawdzonego pliku, jeśli lista zawiedzie.
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : "Przycinanie kopii zostało zatrzymane.");
+  }
+  try {
+    await pruneInbox();
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : "Czyszczenie porzuconych wgrań zostało zatrzymane.");
   }
   return {
     ok: true as const,
@@ -1108,6 +1209,11 @@ export async function downloadBackupPart(sha256: string, slice: number) {
 export async function beginRestoreUpload(sealedManifest: string) {
   if (sealedManifest.length > SERVER_PAYLOAD_LIMIT) {
     throw new Error("Manifest kopii jest zbyt duży. Nic nie zostało podmienione.");
+  }
+  try {
+    await pruneInbox();
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : "Czyszczenie porzuconych wgrań zostało zatrzymane.");
   }
   let manifest: BackupManifest;
   try {
@@ -1176,7 +1282,12 @@ export async function finishRestoreUpload(session: string, expectedRevision: num
     const leftovers = await blobList(`${INBOX}${session}/`);
     await blobDelete(leftovers.flatMap((blob) => [blob.url || "", blob.downloadUrl || ""]));
   } catch {
-    // Skrzynka wgrywania zostaje. Kopia źródłowa i strona nie są przez to kasowane.
+    // Skrzynka tego wgrywania zostaje. Kopia źródłowa i strona nie są przez to kasowane.
+  }
+  try {
+    await pruneInbox(session);
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : "Czyszczenie porzuconych wgrań zostało zatrzymane.");
   }
   return restored;
 }

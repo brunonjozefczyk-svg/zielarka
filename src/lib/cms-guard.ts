@@ -65,6 +65,50 @@ export function urlsToRetain(blobs: KeptBlob[]) {
   return sorted.filter((item) => !keep.has(item.pathname)).map((item) => item.url).filter(Boolean);
 }
 
+/** Uszkodzona baza nie blokuje zapisu odzyskania. Nowsza, czytelna wersja blokuje. */
+export function sameRevisionOrUnreadable(fresh: number | null, expected: number, unreadable: boolean): "proceed" | "conflict" {
+  if (unreadable || fresh == null) return "proceed";
+  if (!Number.isInteger(fresh) || fresh !== expected) return "conflict";
+  return "proceed";
+}
+
+/** Wskaźnik publiczny jest wiarygodny tylko, gdy nie powstała już nowsza wersja. */
+export function trustPublicPointer(pointerRevision: number, nextJournalExists: boolean): boolean {
+  return Number.isInteger(pointerRevision) && pointerRevision >= 0 && nextJournalExists === false;
+}
+
+export const INBOX_TTL_MS = 48 * 60 * 60 * 1000;
+
+/**
+ * Porzucone wgrywanie kopii. Nie rusza aktywnej sesji ani pliku bez daty.
+ * Zwraca adresy do skasowania, nigdy ścieżki bieżącego przywracania.
+ */
+export function expiredInboxUrls(
+  files: { pathname: string; url: string; uploadedAt: number }[],
+  now: number,
+  activeSession = "",
+  ttlMs = INBOX_TTL_MS,
+): string[] {
+  const groups = new Map<string, { newest: number; urls: string[]; unknown: boolean }>();
+  for (const file of files) {
+    const match = /^zielarka\/restore-inbox\/([a-f0-9]{32})\//.exec(file.pathname);
+    if (!match?.[1] || !file.url) continue;
+    const session = match[1];
+    const row = groups.get(session) ?? { newest: 0, urls: [], unknown: false };
+    row.urls.push(file.url);
+    if (!Number.isFinite(file.uploadedAt) || file.uploadedAt <= 0) row.unknown = true;
+    else if (file.uploadedAt > row.newest) row.newest = file.uploadedAt;
+    groups.set(session, row);
+  }
+  const drop: string[] = [];
+  for (const [session, row] of groups) {
+    if (session === activeSession || row.unknown) continue;
+    if (now - row.newest < ttlMs) continue;
+    drop.push(...row.urls);
+  }
+  return drop;
+}
+
 export function createAttemptLimiter(max = 8, windowMs = 15 * 60_000) {
   const rows = new Map<string, { count: number; until: number }>();
   return {
@@ -164,9 +208,10 @@ export function memWrite(
   nextPrivate: string,
   nextPublic: string,
   failAt?: "private" | "public" | "public-commit",
+  damaged = false,
 ): { ok: true; revision: number } | { ok: false; message: string } {
   const current = mem.privateRev;
-  if (expected !== current || mem.lock === expected) {
+  if (mem.lock === expected || (!damaged && expected !== current)) {
     return { ok: false, message: "Ktoś zapisał w międzyczasie. Odśwież stronę." };
   }
   mem.lock = expected;

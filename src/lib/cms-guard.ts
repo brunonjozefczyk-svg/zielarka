@@ -112,6 +112,75 @@ export function publicJournalFailure(isNewest: boolean, error: unknown): "stop" 
   return readFailureAction(error);
 }
 
+const JOURNAL_SHA = /^[a-f0-9]{64}$/;
+
+/**
+ * Wpis dziennika jest aktualny tylko razem z dokumentem.
+ * Numer pliku, numer wewnątrz wpisu, numer dokumentu i SHA-256 treści muszą być jednym zapisem.
+ * Brak numeru wewnątrz (stary plik) przechodzi wyłącznie, gdy dokument i suma się zgadzają.
+ */
+export function judgeJournal(input: {
+  journalRevision: number;
+  pointerRevision?: number | null;
+  pointerUrl: unknown;
+  pointerSha: unknown;
+  docRevision: number;
+  docSha: string;
+}): "ok" | "damaged" {
+  if (!Number.isInteger(input.journalRevision) || input.journalRevision < 0) return "damaged";
+  if (typeof input.pointerUrl !== "string" || !input.pointerUrl) return "damaged";
+  if (input.pointerRevision !== undefined && input.pointerRevision !== null) {
+    if (!Number.isInteger(input.pointerRevision) || input.pointerRevision !== input.journalRevision) return "damaged";
+  }
+  if (typeof input.pointerSha !== "string" || !JOURNAL_SHA.test(input.pointerSha)) return "damaged";
+  if (!Number.isInteger(input.docRevision) || input.docRevision !== input.journalRevision) return "damaged";
+  if (input.docSha !== input.pointerSha) return "damaged";
+  return "ok";
+}
+
+/** Jeden plik dziennika. Awaria najnowszego nie schodzi niżej. Uszkodzona treść może. */
+export function journalStep<T>(input: {
+  isNewest: boolean;
+  journalRevision: number;
+  pointerRevision?: number | null;
+  pointerUrl: unknown;
+  pointerSha: unknown;
+  doc: T | null;
+  docRevision: number;
+  docSha: string;
+  error: unknown | null;
+}): { action: "use"; value: T } | { action: "try-older" } | { action: "stop"; error: unknown } {
+  if (input.error) {
+    if (publicJournalFailure(input.isNewest, input.error) === "stop") return { action: "stop", error: input.error };
+    return { action: "try-older" };
+  }
+  const verdict = judgeJournal({
+    journalRevision: input.journalRevision,
+    pointerRevision: input.pointerRevision,
+    pointerUrl: input.pointerUrl,
+    pointerSha: input.pointerSha,
+    docRevision: input.docRevision,
+    docSha: input.docSha,
+  });
+  if (verdict === "ok" && input.doc != null) return { action: "use", value: input.doc };
+  const damaged = new Error("Kopia jest uszkodzona.");
+  if (publicJournalFailure(input.isNewest, damaged) === "stop") return { action: "stop", error: damaged };
+  return { action: "try-older" };
+}
+
+/**
+ * Koszt odczytu publicznego po 30 s pamięci. Kolejność listy Blob nie jest gwarantowana,
+ * więc najwyższy numer wymaga pełnej listy. Suma i rewizja są w już pobranym dzienniku i dokumencie.
+ * 100 i 1000 zapisów: 1 lista. 10 000 zapisów: 10 list. Do tego 2 odczyty treści.
+ */
+export function publicReadCost(saves: number, pageSize = 1000): { listRequests: number; documentRequests: number } {
+  if (!Number.isInteger(saves) || saves < 0 || !Number.isInteger(pageSize) || pageSize < 1) {
+    return { listRequests: 0, documentRequests: 0 };
+  }
+  if (saves === 0) return { listRequests: 0, documentRequests: 0 };
+  return { listRequests: Math.ceil(saves / pageSize), documentRequests: 2 };
+}
+
 export const STORE_OUTAGE = "Magazyn treści jest chwilowo niedostępny. Zapis został zatrzymany. Nic nie zostało cofnięte.";
 
 /**

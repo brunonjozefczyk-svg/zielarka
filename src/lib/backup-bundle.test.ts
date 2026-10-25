@@ -31,6 +31,13 @@ import {
 import { OFFSITE_AUTOMATIC, offsiteDecision, offsiteExportAllowed } from "./backup-wire.ts";
 import { openJson, sealJson } from "./draft-seal.server.ts";
 import { parseStoredEntry } from "./entries.ts";
+import {
+  assertDrillKey,
+  capDrillDeletes,
+  classifyDrillConfig,
+  createMemoryDrillStore,
+  runCmsRestoreDrill,
+} from "./cms-restore-drill.ts";
 
 const PNG = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
@@ -586,5 +593,84 @@ test("archiwum po rotacji otwiera się aktualnym kluczem i nie nadpisuje starej 
     else process.env.CMS_SEAL_KEYS = previousKeys;
     if (previousPassword === undefined) delete process.env.EDITOR_PASSWORD;
     else process.env.EDITOR_PASSWORD = previousPassword;
+  }
+});
+
+test("próba odzyskania w pamięci przechodzi, a SKIPPED nie jest sukcesem", async () => {
+  const previous = process.env.CMS_SEAL_KEY;
+  process.env.CMS_SEAL_KEY = "zostaw-klucz-testu";
+  try {
+    const store = createMemoryDrillStore();
+    await assert.rejects(() => store.put("zielarka/content.json", "{}"), /Odmawiam/);
+    assert.deepEqual(store.keys(), []);
+    assert.throws(() => assertDrillKey("../x"), /Odmawiam/);
+    assert.throws(() => capDrillDeletes(Array.from({ length: 81 }, (_, index) => `plik/${index}`)), /Nic nie zostało skasowane/);
+    const report = await runCmsRestoreDrill(store, {
+      k1: randomBytes(32).toString("base64"),
+      k2: randomBytes(32).toString("base64"),
+    });
+    assert.equal(report.status, "PASSED");
+    assert.equal(store.keys().some((key) => key.startsWith("zielarka/")), false);
+    assert.equal(process.env.CMS_SEAL_KEY, "zostaw-klucz-testu");
+    const skipped = classifyDrillConfig({});
+    assert.equal(skipped.status, "SKIPPED");
+    assert.equal(skipped.exitCode, 2);
+    const required = classifyDrillConfig({ ZIELARKA_REQUIRE_BLOB_DRILL: "tak" });
+    assert.equal(required.status, "FAILED");
+    assert.equal(required.exitCode, 1);
+    const key = randomBytes(32).toString("base64");
+    assert.equal(
+      classifyDrillConfig({
+        ZIELARKA_TEST_BLOB_OK: "tak",
+        ZIELARKA_TEST_BLOB_TOKEN: "vercel_blob_rw_aaaa1111_bbbb2222",
+        ZIELARKA_TEST_BLOB_STORE: "aaaa1111",
+        ZIELARKA_TEST_CMS_SEAL_KEY: key,
+        BLOB_READ_WRITE_TOKEN: "vercel_blob_rw_aaaa1111_cccc3333",
+      }).status,
+      "FAILED",
+    );
+    assert.equal(
+      classifyDrillConfig({
+        ZIELARKA_TEST_BLOB_OK: "tak",
+        ZIELARKA_TEST_BLOB_TOKEN: "vercel_blob_rw_aaaa1111_bbbb2222",
+        ZIELARKA_TEST_BLOB_STORE: "aaaa1111",
+        ZIELARKA_TEST_CMS_SEAL_KEY: key,
+        BLOB_READ_WRITE_TOKEN: "vercel_blob_rw_aaaa1111_bbbb2222",
+      }).status,
+      "FAILED",
+    );
+    assert.equal(
+      classifyDrillConfig({
+        ZIELARKA_TEST_BLOB_OK: "tak",
+        ZIELARKA_TEST_BLOB_TOKEN: "vercel_blob_rw_dddd1111_bbbb2222",
+        ZIELARKA_TEST_BLOB_STORE: "dddd1111",
+        ZIELARKA_TEST_CMS_SEAL_KEY: key,
+        CMS_SEAL_KEY: `k2:${key}`,
+      }).status,
+      "FAILED",
+    );
+    assert.equal(
+      classifyDrillConfig({
+        ZIELARKA_TEST_BLOB_OK: "tak",
+        ZIELARKA_TEST_BLOB_TOKEN: "vercel_blob_rw_dddd1111_bbbb2222",
+        ZIELARKA_TEST_BLOB_STORE: "dddd1111",
+        ZIELARKA_TEST_CMS_SEAL_KEY: key,
+        BLOB_READ_WRITE_TOKEN: "nie-token",
+      }).status,
+      "FAILED",
+    );
+    const ready = classifyDrillConfig({
+      ZIELARKA_TEST_BLOB_OK: "tak",
+      ZIELARKA_TEST_BLOB_TOKEN: "vercel_blob_rw_dddd1111_bbbb2222",
+      ZIELARKA_TEST_BLOB_STORE: "DDDD1111",
+      ZIELARKA_TEST_CMS_SEAL_KEY: key,
+      BLOB_READ_WRITE_TOKEN: "vercel_blob_rw_eeee2222_ffff3333",
+      CMS_SEAL_KEY: randomBytes(32).toString("base64"),
+    });
+    assert.equal(ready.status, "READY");
+    if (ready.status === "READY") assert.equal(ready.storeId, "dddd1111");
+  } finally {
+    if (previous === undefined) delete process.env.CMS_SEAL_KEY;
+    else process.env.CMS_SEAL_KEY = previous;
   }
 });

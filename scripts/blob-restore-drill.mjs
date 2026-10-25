@@ -1,145 +1,203 @@
 #!/usr/bin/env node
 /**
- * Próbny zapis na OSOBNYM magazynie Vercel Blob. Nie rusza ścieżek produkcyjnych zielarka/.
+ * Pełny test odzyskania CMS na OSOBNYM magazynie Vercel Blob.
  *
- * Bez zmiennych nic nie wysyła i kończy się kodem 0.
+ * PASSED  — test naprawdę się wykonał (kod 0).
+ * FAILED  — test się nie udał albo był wymagany i nie miał konfiguracji (kod 1).
+ * SKIPPED — nie uruchomiono (kod 2). To nie jest potwierdzenie poprawności.
  *
- * Uruchomienie, dopiero gdy masz drugi, pusty magazyn (nie token produkcji):
- *   ZIELARKA_TEST_BLOB_OK=tak \
- *   ZIELARKA_TEST_BLOB_TOKEN='vercel_blob_rw_...' \
- *   node scripts/blob-restore-drill.mjs
+ * Bez zmiennych skrypt nic nie wysyła.
  *
- * Token testowy nie może być równy BLOB_READ_WRITE_TOKEN.
- * Skrypt pisze wyłącznie pod zielarka-itest/<losowy-id>/ i kasuje tylko te adresy.
- * Nie przywraca CMS, nie rotuje produkcyjnego klucza i nie dotyka zielarka.pl.
+ * Prawdziwy bieg, dopiero na drugim, pustym magazynie (nie token produkcji):
+ *   1. Utwórz w Vercel osobny Blob store. Nie używaj magazynu zielarka.pl.
+ *   2. Skopiuj jego token. Ma postać vercel_blob_rw_<id>_<sekret>.
+ *   3. Wygeneruj klucz inny niż CMS_SEAL_KEY:
+ *        node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
+ *   4. Uruchom:
+ *        ZIELARKA_TEST_BLOB_OK=tak \
+ *        ZIELARKA_TEST_BLOB_TOKEN='vercel_blob_rw_...' \
+ *        ZIELARKA_TEST_BLOB_STORE='<id z tokenu>' \
+ *        ZIELARKA_TEST_CMS_SEAL_KEY='<base64 32 bajty>' \
+ *        node --import jiti/register scripts/blob-restore-drill.mjs
  *
- * Pełne przywrócenie edytora (artykuły, szkice, zdjęcia, rotacja k1→k2, fraza PRZYWRÓĆ)
- * wymaga osobnego store i testowego CMS_SEAL_KEY. Tego ten skrypt nie robi na produkcji.
- * Reguły luki w numeracji i rotacji klucza sprawdzają testy jednostkowe (npm test).
+ * Wymuszony bieg, gdy brak konfiguracji ma być błędem:
+ *   ZIELARKA_REQUIRE_BLOB_DRILL=tak node scripts/blob-restore-drill.mjs
+ *
+ * Skrypt pisze i kasuje wyłącznie zielarka-itest/<id-próby>/.
+ * Odmawia tokenu równego BLOB_READ_WRITE_TOKEN, tego samego identyfikatora magazynu
+ * i klucza równego CMS_SEAL_KEY albo CMS_SEAL_KEYS. Nie kasuje ścieżek zielarka/.
  */
-import { createHash, randomBytes } from "node:crypto";
+import { randomBytes } from "node:crypto";
 
-const API = "11";
-const ok = process.env.ZIELARKA_TEST_BLOB_OK === "tak";
-const token = process.env.ZIELARKA_TEST_BLOB_TOKEN || "";
-const production = process.env.BLOB_READ_WRITE_TOKEN || "";
+const requireRun = process.env.ZIELARKA_REQUIRE_BLOB_DRILL === "tak";
+const opted = process.env.ZIELARKA_TEST_BLOB_OK === "tak" && Boolean((process.env.ZIELARKA_TEST_BLOB_TOKEN || "").trim());
 
-function explain() {
+if (!opted) {
+  const status = requireRun ? "FAILED" : "SKIPPED";
   console.log(
-    [
-      "Próba na prawdziwym Blob nie została uruchomiona.",
-      "Brak osobnego tokenu testowego. Produkcja nie była ruszana.",
-      "Żeby ją włączyć: drugi magazyn Blob, ZIELARKA_TEST_BLOB_OK=tak i ZIELARKA_TEST_BLOB_TOKEN.",
-      "Nie wklejaj tokenu produkcji.",
-    ].join(" "),
+    requireRun
+      ? "Pełny test odzyskania na Vercel Blob był wymagany, ale brak osobnego magazynu. Nic nie zostało zapisane."
+      : "Próba odzyskania na Vercel Blob nie została uruchomiona. Brak osobnego magazynu testowego. To nie jest potwierdzenie poprawności. Produkcja nie była ruszana.",
   );
+  console.log(status);
+  process.exit(requireRun ? 1 : 2);
 }
 
-if (!ok || !token) {
-  explain();
-  process.exit(0);
+const { assertDrillKey, capDrillDeletes, classifyDrillConfig, runCmsRestoreDrill, DRILL_DELETE_CAP } = await import(
+  "../src/lib/cms-restore-drill.ts"
+);
+
+const decision = classifyDrillConfig(process.env);
+if (decision.status !== "READY") {
+  console.log(decision.message);
+  console.log(decision.status);
+  process.exit(decision.exitCode);
 }
 
+const token = decision.token;
+const production = (process.env.BLOB_READ_WRITE_TOKEN || "").trim();
 if (production && production === token) {
-  console.error("Token testowy jest taki sam jak BLOB_READ_WRITE_TOKEN. Nic nie zostało zapisane.");
+  console.log("Token testowy jest taki sam jak BLOB_READ_WRITE_TOKEN. Nic nie zostało zapisane.");
+  console.log("FAILED");
+  process.exit(1);
+}
+
+const k2 = randomBytes(32).toString("base64");
+if (k2 === decision.testKey) {
+  console.log("Nie da się wylosować drugiego klucza próby. Nic nie zostało zapisane.");
+  console.log("FAILED");
   process.exit(1);
 }
 
 const runId = randomBytes(8).toString("hex");
 const prefix = `zielarka-itest/${runId}/`;
+const API = "11";
+const urls = new Map();
 
 function assertOwn(pathname) {
-  if (!pathname.startsWith(prefix) || pathname.includes("..") || pathname.startsWith("zielarka/")) {
+  if (
+    typeof pathname !== "string" ||
+    !pathname.startsWith(prefix) ||
+    pathname.includes("..") ||
+    pathname.startsWith("zielarka/") ||
+    pathname.includes("/zielarka/")
+  ) {
     throw new Error("Odmawiam ścieżki spoza próby. Nic więcej nie ruszam.");
   }
 }
 
-async function blobPut(pathname, body) {
-  assertOwn(pathname);
-  const res = await fetch(`https://vercel.com/api/blob/?${new URLSearchParams({ pathname })}`, {
-    method: "PUT",
-    headers: {
-      authorization: `Bearer ${token}`,
-      "x-api-version": API,
-      "x-content-type": "application/json",
-      "x-add-random-suffix": "0",
-      "x-allow-overwrite": "1",
-    },
-    body,
-  });
-  if (!res.ok) throw new Error(`Zapis próby nie powiódł się (${res.status}).`);
-  const data = await res.json();
-  if (!data?.url || typeof data.url !== "string") throw new Error("Zapis próby nie zwrócił adresu.");
-  return data.url;
-}
-
-async function blobList() {
-  const res = await fetch(`https://vercel.com/api/blob/?${new URLSearchParams({ prefix, limit: "1000" })}`, {
-    headers: { authorization: `Bearer ${token}`, "x-api-version": API },
-  });
-  if (!res.ok) throw new Error(`Odczyt próby nie powiódł się (${res.status}).`);
-  const data = await res.json();
-  const blobs = Array.isArray(data.blobs) ? data.blobs : [];
-  for (const blob of blobs) assertOwn(String(blob.pathname || ""));
-  return blobs;
-}
-
-async function blobDelete(urls) {
-  const clean = [...new Set(urls.filter((url) => typeof url === "string" && url.includes("vercel-storage.com")))];
-  if (!clean.length) return;
-  const res = await fetch("https://vercel.com/api/blob/delete", {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${token}`,
-      "x-api-version": API,
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({ urls: clean }),
-  });
-  if (!res.ok) throw new Error(`Kasowanie próby nie powiodło się (${res.status}).`);
-}
-
-const created = [];
-try {
-  const image = randomBytes(64);
-  const sha = createHash("sha256").update(image).digest("hex");
-  const pointer = JSON.stringify({ revision: 10, url: "https://example.invalid/old" });
-  const journal10 = JSON.stringify({ revision: 10, url: "https://example.invalid/10" });
-  const journal12 = JSON.stringify({ revision: 12, url: "https://example.invalid/12", sha });
-  created.push(await blobPut(`${prefix}current.json`, pointer));
-  created.push(await blobPut(`${prefix}journal/00000010.json`, journal10));
-  created.push(await blobPut(`${prefix}journal/00000012.json`, journal12));
-  created.push(await blobPut(`${prefix}parts/${sha}.json`, JSON.stringify({ sha, bytes: image.toString("base64") })));
-
-  const listed = await blobList();
-  const numbers = listed
-    .map((blob) => /\/journal\/(\d+)\.json$/.exec(String(blob.pathname || "")))
-    .map((match) => (match ? Number(match[1]) : -1))
-    .filter((value) => value >= 0);
-  const newest = numbers.reduce((best, value) => (value > best ? value : best), -1);
-  if (newest !== 12 || !numbers.includes(10) || numbers.includes(11)) {
-    throw new Error("Lista próby nie pokazuje luki 10 i 12. Nic produkcyjnego nie było ruszane.");
+async function listOwned() {
+  const found = [];
+  let cursor = "";
+  for (let page = 0; page < 5; page += 1) {
+    const params = new URLSearchParams({ prefix, limit: "1000" });
+    if (cursor) params.set("cursor", cursor);
+    const res = await fetch(`https://vercel.com/api/blob/?${params}`, {
+      headers: { authorization: `Bearer ${token}`, "x-api-version": API },
+    });
+    if (!res.ok) throw new Error(`Odczyt próby nie powiódł się (${res.status}).`);
+    const data = await res.json();
+    const blobs = Array.isArray(data.blobs) ? data.blobs : [];
+    for (const blob of blobs) {
+      const pathname = String(blob.pathname || "");
+      assertOwn(pathname);
+      const key = pathname.slice(prefix.length);
+      assertDrillKey(key);
+      found.push({ key, url: typeof blob.url === "string" ? blob.url : "", downloadUrl: typeof blob.downloadUrl === "string" ? blob.downloadUrl : "" });
+    }
+    if (!data.hasMore) return found;
+    if (typeof data.cursor !== "string" || !data.cursor || data.cursor === cursor) {
+      throw new Error("Lista próby zapętliła się. Nic nie zostało skasowane.");
+    }
+    cursor = data.cursor;
   }
-  const part = listed.find((blob) => String(blob.pathname || "").endsWith(`${sha}.json`));
-  const partUrl = part?.downloadUrl || part?.url;
-  if (!partUrl) throw new Error("Brak części próby.");
-  const back = await fetch(partUrl, { cache: "no-store" });
-  if (!back.ok) throw new Error(`Odczyt części próby nie powiódł się (${back.status}).`);
-  const opened = await back.json();
-  const got = Buffer.from(opened.bytes || "", "base64");
-  if (!got.equals(image)) throw new Error("Bajty próby nie wróciły takie same.");
+  throw new Error("Lista próby jest za długa. Nic nie zostało skasowane.");
+}
 
-  await blobDelete(created);
-  const after = await blobList();
-  if (after.length) throw new Error("Po próbie zostały pliki testowe. Produkcja nie była ruszana.");
-  console.log(`Próba na osobnym prefiksie ${prefix} przeszła i została skasowana. To nie jest test produkcyjnego CMS.`);
+const store = {
+  async put(key, body) {
+    assertDrillKey(key);
+    const pathname = `${prefix}${key}`;
+    assertOwn(pathname);
+    const res = await fetch(`https://vercel.com/api/blob/?${new URLSearchParams({ pathname })}`, {
+      method: "PUT",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "x-api-version": API,
+        "x-content-type": "application/json",
+        "x-add-random-suffix": "0",
+        "x-allow-overwrite": "1",
+      },
+      body,
+    });
+    if (!res.ok) throw new Error(`Zapis próby nie powiódł się (${res.status}).`);
+    const data = await res.json();
+    if (!data?.url || typeof data.url !== "string") throw new Error("Zapis próby nie zwrócił adresu.");
+    urls.set(key, data.downloadUrl || data.url);
+  },
+  async get(key) {
+    assertDrillKey(key);
+    const known = urls.get(key);
+    if (!known) return null;
+    const res = await fetch(known, {
+      cache: "no-store",
+      headers: { authorization: `Bearer ${token}` },
+    });
+    if (res.status === 404) return null;
+    if (!res.ok) throw new Error(`Odczyt próby nie powiódł się (${res.status}).`);
+    return res.text();
+  },
+  async list() {
+    const blobs = await listOwned();
+    return blobs.map((blob) => blob.key);
+  },
+  async delete(keys) {
+    const clean = capDrillDeletes(keys);
+    const owned = await listOwned();
+    if (owned.length > DRILL_DELETE_CAP) throw new Error("Za dużo plików do skasowania. Nic nie zostało skasowane.");
+    const wanted = new Set(clean);
+    const drop = [];
+    for (const blob of owned) {
+      if (!wanted.has(blob.key)) continue;
+      if (blob.url) drop.push(blob.url);
+      if (blob.downloadUrl && blob.downloadUrl !== blob.url) drop.push(blob.downloadUrl);
+    }
+    const unique = [...new Set(drop)].filter((url) => url.includes("vercel-storage.com"));
+    if (unique.length > DRILL_DELETE_CAP) throw new Error("Za dużo plików do skasowania. Nic nie zostało skasowane.");
+    if (unique.length) {
+      const res = await fetch("https://vercel.com/api/blob/delete", {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${token}`,
+          "x-api-version": API,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ urls: unique }),
+      });
+      if (!res.ok) throw new Error(`Kasowanie próby nie powiodło się (${res.status}). Nic więcej nie zostało skasowane.`);
+    }
+    for (const key of clean) urls.delete(key);
+  },
+};
+
+async function cleanup() {
+  const left = await store.list();
+  if (left.length) await store.delete(left);
+}
+
+try {
+  const report = await runCmsRestoreDrill(store, { k1: decision.testKey, k2 });
+  await cleanup();
+  if (report.status !== "PASSED") throw new Error("Próba nie zwróciła PASSED.");
+  console.log(`Próba odzyskania na prefiksie ${prefix} przeszła i została skasowana. Produkcja nie była ruszana.`);
+  console.log("PASSED");
 } catch (error) {
   try {
-    const leftover = await blobList();
-    await blobDelete(leftover.flatMap((blob) => [blob.url, blob.downloadUrl].filter(Boolean)));
+    await cleanup();
   } catch {
-    console.error("Nie udało się posprzątać prefiksu próby. Produkcyjnych ścieżek zielarka/ skrypt nie używa.");
+    console.error("Nie udało się posprzątać prefiksu próby. Ścieżek zielarka/ skrypt nie używa.");
   }
   console.error(error instanceof Error ? error.message : "Próba nie przeszła.");
+  console.log("FAILED");
   process.exit(1);
 }

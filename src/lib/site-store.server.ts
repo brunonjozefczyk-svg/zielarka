@@ -4,16 +4,19 @@ import { builtinSlugs, type ManagedEntry, normalizeEntry, parseStoredEntry, slug
 import {
   assertRevision,
   attemptBlocked,
+  canonicalEdits,
   createAttemptLimiter,
   nextAttempt,
   toPublicDoc,
   urlsToPrune,
+  urlsToRetain,
   lockDecision,
   publicFallback,
   type AttemptRow,
+  type KeptBlob,
   type StampBlob,
 } from "./cms-guard";
-import { openJson, sealJson } from "./draft-seal.server";
+import { openJson, payloadSha, sealJson } from "./draft-seal.server";
 import { sanitizeStyle, sanitizeStyles, sanitizeTheme, type TextStyle, type ThemeSettings } from "./theme";
 
 export type SiteEdits = {
@@ -31,10 +34,12 @@ const DOCS = "zielarka/docs/";
 const PRIVATE_DOCS = "zielarka/private/";
 const PUBLIC_DOCS = "zielarka/public/";
 const PUBLIC_CACHE_MS = 30_000;
-const PRIVATE_KEEP = 8;
-const PUBLIC_KEEP = 3;
 const LOCKS = "zielarka/locks/";
 const AUTH = "zielarka/auth/";
+const JOURNAL_PUBLIC = "zielarka/journal/public/";
+const JOURNAL_PRIVATE = "zielarka/journal/private/";
+const BACKUPS = "zielarka/backups/";
+const SEALED_IMAGES = "zielarka/sealed-images/";
 
 function empty(): SiteEdits {
   return { revision: 0, copy: {}, images: {}, herbs: {}, entries: [], theme: null, styles: {} };
@@ -205,10 +210,59 @@ function parseDoc(data: Partial<SiteEdits> & { revision?: unknown }): SiteEdits 
   };
 }
 
-async function fetchDoc(url: string) {
+function stamped(doc: SiteEdits) {
+  const body = canonicalEdits(doc);
+  return { text: JSON.stringify({ ...JSON.parse(body), sha: payloadSha(body) }), sha: payloadSha(body) };
+}
+
+function unwrapDoc(raw: unknown): SiteEdits {
+  const opened = openJson(raw);
+  if (!opened || typeof opened !== "object") return parseDoc({});
+  const record = { ...(opened as Record<string, unknown>) };
+  const sha = typeof record.sha === "string" ? record.sha : "";
+  delete record.sha;
+  const doc = parseDoc(record as Partial<SiteEdits>);
+  if (sha && payloadSha(canonicalEdits(doc)) !== sha) throw new Error("Kopia jest uszkodzona.");
+  return doc;
+}
+
+function revisionFromPath(pathname: string) {
+  const match = /(\d+)\.json$/.exec(pathname);
+  return match ? Number(match[1]) : 0;
+}
+
+function padRevision(revision: number) {
+  return String(revision).padStart(8, "0");
+}
+
+async function fetchJson(url: string) {
   const res = await fetch(url, { cache: "no-store" });
   if (!res.ok) throw new Error(`Odczyt treści nie powiódł się (${res.status}).`);
-  return parseDoc(openJson(await res.json()) as Partial<SiteEdits>);
+  return (await res.json()) as unknown;
+}
+
+async function fetchDoc(url: string) {
+  return unwrapDoc(await fetchJson(url));
+}
+
+function highestRevision(blobs: BlobMeta[]) {
+  return blobs
+    .filter((blob) => blob.pathname && readUrl(blob))
+    .sort((a, b) => revisionFromPath(String(b.pathname)) - revisionFromPath(String(a.pathname)))[0];
+}
+
+async function readPointer(prefix: string): Promise<{ revision: number; url: string; sha: string } | null> {
+  const latest = highestRevision(await blobList(prefix));
+  if (!latest) return null;
+  const opened = openJson(await fetchJson(readUrl(latest)));
+  if (!opened || typeof opened !== "object") return null;
+  const pointer = opened as { url?: unknown; sha?: unknown };
+  if (typeof pointer.url !== "string" || !pointer.url) return null;
+  return {
+    revision: revisionFromPath(String(latest.pathname)),
+    url: pointer.url,
+    sha: typeof pointer.sha === "string" ? pointer.sha : "",
+  };
 }
 
 async function loadLegacy(): Promise<SiteEdits | null> {
@@ -220,6 +274,12 @@ async function loadLegacy(): Promise<SiteEdits | null> {
 }
 
 async function loadPrivateFresh(): Promise<SiteEdits> {
+  try {
+    const pointer = await readPointer(JOURNAL_PRIVATE);
+    if (pointer) return fetchDoc(pointer.url);
+  } catch {
+    // Zostaje odczyt plików, dopóki nie ma poprawnego dziennika.
+  }
   const latest = newest(await blobList(PRIVATE_DOCS));
   if (latest) return fetchDoc(readUrl(latest));
   return (await loadLegacy()) ?? empty();
@@ -228,8 +288,18 @@ async function loadPrivateFresh(): Promise<SiteEdits> {
 async function loadPublic(): Promise<SiteEdits> {
   if (publicCache && Date.now() - publicCache.at < PUBLIC_CACHE_MS) return publicCache.data;
   try {
-    const latest = newest(await blobList(PUBLIC_DOCS));
-    const doc = latest ? toPublicDoc(await fetchDoc(readUrl(latest))) : toPublicDoc((await loadLegacy()) ?? empty());
+    const blobs = await blobList(JOURNAL_PUBLIC);
+    const latest = highestRevision(blobs);
+    if (latest) {
+      const pointer = (await fetchJson(readUrl(latest))) as { url?: string; sha?: string };
+      if (pointer.url) {
+        const doc = toPublicDoc(await fetchDoc(pointer.url));
+        publicCache = { at: Date.now(), data: doc };
+        return doc;
+      }
+    }
+    const pub = newest(await blobList(PUBLIC_DOCS));
+    const doc = pub ? toPublicDoc(await fetchDoc(readUrl(pub))) : toPublicDoc((await loadLegacy()) ?? empty());
     publicCache = { at: Date.now(), data: doc };
     return doc;
   } catch (error) {
@@ -313,18 +383,34 @@ async function writeEdits(doc: SiteEdits) {
   const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const privatePath = `${PRIVATE_DOCS}${id}.json`;
   const publicPath = `${PUBLIC_DOCS}${id}.json`;
+  const privateStamp = stamped(next);
+  const published = toPublicDoc(parseDoc(next));
+  const publicStamp = stamped(published);
+  let privateUrl = "";
+  let publicUrl = "";
   try {
-    await blobPut(privatePath, sealJson(JSON.stringify(next)), "application/json");
-    const published = toPublicDoc(next);
-    await blobPut(publicPath, JSON.stringify(published), "application/json");
+    privateUrl = (await blobPut(privatePath, sealJson(privateStamp.text), "application/json")).url;
+    const check = await fetchDoc(privateUrl);
+    if (check.revision !== next.revision) throw new Error("Kopia prywatna nie zgadza się.");
+    publicUrl = (await blobPut(publicPath, publicStamp.text, "application/json")).url;
+    const publicCheck = await fetchDoc(publicUrl);
+    if (publicCheck.revision !== next.revision) throw new Error("Kopia publiczna nie zgadza się.");
+    await blobPut(
+      `${JOURNAL_PRIVATE}${padRevision(next.revision)}.json`,
+      sealJson(JSON.stringify({ revision: next.revision, url: privateUrl, sha: privateStamp.sha })),
+      "application/json",
+    );
+    await blobPut(
+      `${JOURNAL_PUBLIC}${padRevision(next.revision)}.json`,
+      JSON.stringify({ revision: next.revision, url: publicUrl, sha: publicStamp.sha }),
+      "application/json",
+    );
     publicCache = { at: Date.now(), data: published };
   } catch (error) {
     if (lockUrl) await blobDelete([lockUrl]);
     throw error;
   }
   try {
-    await prune(PRIVATE_DOCS, PRIVATE_KEEP, privatePath);
-    await prune(PUBLIC_DOCS, PUBLIC_KEEP, publicPath);
     await prune(LOCKS, 40, lockPath);
   } catch {
     // Starsze kopie zostają. Bieżący zapis już jest.
@@ -377,6 +463,26 @@ async function storeImageBytes(id: string, dataUrl: string) {
   return blob.url;
 }
 
+async function storeSealedImage(id: string, dataUrl: string) {
+  const match = /^data:image\/(?:jpeg|png|webp);base64,([a-z0-9+/=\s]+)$/i.exec(dataUrl);
+  if (!match) throw new Error("To nie jest zdjęcie.");
+  const bytes = Buffer.from(match[1].replace(/\s/g, ""), "base64");
+  if (bytes.length < 32 || bytes.length > 2_500_000 || !imageKind(bytes)) throw new Error("Zdjęcie jest za duże.");
+  const safe = id.replace(/[^a-z0-9_-]/gi, "").slice(0, 80) || "obraz";
+  const blob = await blobPut(
+    `${SEALED_IMAGES}${safe}-${Date.now()}.json`,
+    sealJson(JSON.stringify({ dataUrl })),
+    "application/json",
+  );
+  return `seal:${blob.url}`;
+}
+
+async function publishSealedImage(ref: string) {
+  const opened = openJson(await fetchJson(ref.slice(5))) as { dataUrl?: string };
+  if (!opened?.dataUrl) throw new Error("Nie da się odczytać zdjęcia szkicu.");
+  return storeImageBytes("img.herb", opened.dataUrl);
+}
+
 export async function saveImage(id: string, dataUrl: string, expectedRevision: number) {
   const url = await storeImageBytes(id, dataUrl);
   const doc = await readForWrite();
@@ -419,7 +525,12 @@ export async function saveEntry(input: unknown, previousSlug: string | undefined
     current?.status === "published" || current?.history.some((item) => item.status === "published");
   if (publishedBefore && current) next.slug = current.slug;
   if (next.image.startsWith("data:")) {
-    next.image = await storeImageBytes(`img.herb.${next.slug}`, next.image);
+    next.image =
+      next.status === "published"
+        ? await storeImageBytes(`img.herb.${next.slug}`, next.image)
+        : await storeSealedImage(`img.herb.${next.slug}`, next.image);
+  } else if (next.image.startsWith("seal:") && next.status === "published") {
+    next.image = await publishSealedImage(next.image);
   } else if (!next.image && current) {
     next.image = current.image;
   }
@@ -459,20 +570,65 @@ export async function deleteEntry(slug: string, expectedRevision: number) {
 export async function restorePrevious(expectedRevision: number) {
   const current = await readForWrite();
   assertRevision(current.revision, expectedRevision);
+  const journals = (await blobList(JOURNAL_PRIVATE))
+    .filter((blob) => blob.pathname && readUrl(blob))
+    .sort((a, b) => revisionFromPath(String(b.pathname)) - revisionFromPath(String(a.pathname)));
+  const previous = journals[1];
+  if (previous) {
+    const pointer = openJson(await fetchJson(readUrl(previous))) as { url?: string };
+    if (!pointer.url) throw new Error("Nie ma starszej kopii.");
+    const restored = await fetchDoc(pointer.url);
+    restored.revision = current.revision;
+    return { revision: await writeEdits(restored) };
+  }
   const sorted = (await blobList(PRIVATE_DOCS))
     .filter((blob) => blob.pathname && readUrl(blob))
     .sort((a, b) => blobStamp(b) - blobStamp(a) || String(b.pathname).localeCompare(String(a.pathname)));
-  const previous = sorted[1];
-  if (!previous) throw new Error("Nie ma starszej kopii.");
-  const restored = await fetchDoc(readUrl(previous));
+  const legacy = sorted[1];
+  if (!legacy) throw new Error("Nie ma starszej kopii.");
+  const restored = await fetchDoc(readUrl(legacy));
   restored.revision = current.revision;
-  const revision = await writeEdits(restored);
-  return { revision };
+  return { revision: await writeEdits(restored) };
+}
+
+async function healPublic() {
+  const priv = await readPointer(JOURNAL_PRIVATE);
+  const pub = await readPointer(JOURNAL_PUBLIC);
+  if (!priv || (pub && pub.revision >= priv.revision)) return;
+  const doc = await fetchDoc(priv.url);
+  const published = toPublicDoc(parseDoc(doc));
+  const stamp = stamped(published);
+  const saved = await blobPut(`${PUBLIC_DOCS}heal-${Date.now()}.json`, stamp.text, "application/json");
+  await blobPut(
+    `${JOURNAL_PUBLIC}${padRevision(doc.revision)}.json`,
+    JSON.stringify({ revision: doc.revision, url: saved.url, sha: stamp.sha }),
+    "application/json",
+  );
+  publicCache = { at: Date.now(), data: published };
+}
+
+async function expandSealedImages(doc: SiteEdits) {
+  const entries = await Promise.all(
+    doc.entries.map(async (entry) => {
+      if (!entry.image.startsWith("seal:")) return entry;
+      try {
+        const opened = openJson(await fetchJson(entry.image.slice(5))) as { dataUrl?: string };
+        return opened.dataUrl ? { ...entry, image: opened.dataUrl } : entry;
+      } catch {
+        return entry;
+      }
+    }),
+  );
+  return { ...doc, entries };
 }
 
 export async function readEditorDoc() {
-  const doc = await readForWrite();
-  return doc;
+  try {
+    await healPublic();
+  } catch {
+    // Prywatna kopia zostaje. Publiczna dogoni się przy kolejnym zapisie.
+  }
+  return expandSealedImages(await readForWrite());
 }
 
 export function publishedHerbs(doc: SiteEdits) {
@@ -497,6 +653,118 @@ async function writeAttempt(id: string, row: AttemptRow) {
   } catch {
     // Licznik jest już zapisany.
   }
+}
+
+export async function backupStatus() {
+  try {
+    const head = await blobHead(`${BACKUPS}status.json`);
+    if (!head || !readUrl(head)) return { ok: false, at: "", revision: 0, kind: "" };
+    const data = (await fetchJson(readUrl(head))) as { ok?: boolean; at?: string; revision?: number; kind?: string };
+    return {
+      ok: Boolean(data.ok),
+      at: data.at || "",
+      revision: typeof data.revision === "number" ? data.revision : 0,
+      kind: data.kind || "",
+    };
+  } catch {
+    return { ok: false, at: "", revision: 0, kind: "" };
+  }
+}
+
+export async function listBackupRows() {
+  const rows: { id: string; at: string; kind: string; revision: number }[] = [];
+  const journals = await blobList(JOURNAL_PRIVATE);
+  for (const blob of journals) {
+    const pathname = blob.pathname || "";
+    if (!pathname) continue;
+    rows.push({
+      id: pathname,
+      at: new Date(blobStamp(blob) || Date.now()).toISOString(),
+      kind: "zapis",
+      revision: revisionFromPath(pathname),
+    });
+  }
+  const backups = await blobList(BACKUPS);
+  for (const blob of backups) {
+    const pathname = blob.pathname || "";
+    if (!pathname || pathname.endsWith("status.json")) continue;
+    const kind = pathname.includes("/daily/") ? "dzienna" : pathname.includes("/monthly/") ? "miesięczna" : "ręczna";
+    rows.push({
+      id: pathname,
+      at: new Date(blobStamp(blob) || Date.now()).toISOString(),
+      kind,
+      revision: 0,
+    });
+  }
+  return rows.sort((a, b) => b.at.localeCompare(a.at)).slice(0, 40);
+}
+
+export async function createVerifiedBackup(kind: "manual" | "daily" | "monthly") {
+  const doc = await readForWrite();
+  const at = new Date().toISOString();
+  const sha = payloadSha(canonicalEdits(doc));
+  const sealed = sealJson(JSON.stringify({ kind, at, revision: doc.revision, sha, doc }));
+  const name =
+    kind === "daily" ? `${BACKUPS}daily/${at.slice(0, 10)}.json` : kind === "monthly" ? `${BACKUPS}monthly/${at.slice(0, 7)}.json` : `${BACKUPS}manual/${Date.now()}.json`;
+  const saved = await blobPut(name, sealed, "application/json");
+  const opened = openJson(await fetchJson(saved.url)) as { sha?: string; doc?: SiteEdits };
+  if (!opened?.doc || opened.sha !== sha || payloadSha(canonicalEdits(parseDoc(opened.doc))) !== sha) {
+    throw new Error("Kopia nie przeszła sprawdzenia. Nic nie zostało podmienione.");
+  }
+  const status = { ok: true, at, revision: doc.revision, kind, sha };
+  await blobPut(`${BACKUPS}status.json`, JSON.stringify(status), "application/json");
+  try {
+    const blobs = await blobList(BACKUPS);
+    const kept: KeptBlob[] = blobs.flatMap((blob) => {
+      const pathname = blob.pathname || "";
+      const url = blob.url || "";
+      if (!pathname || !url || pathname.endsWith("status.json")) return [];
+      return [{ pathname, url, uploadedAt: blobStamp(blob), revision: blobStamp(blob) }];
+    });
+    await blobDelete(urlsToRetain(kept));
+  } catch {
+    // Przycinanie kopii nie rusza świeżo sprawdzonego pliku, jeśli lista zawiedzie.
+  }
+  return { ok: true as const, at, revision: doc.revision, kind };
+}
+
+export async function downloadBackup() {
+  const doc = await readForWrite();
+  const sha = payloadSha(canonicalEdits(doc));
+  const at = new Date().toISOString();
+  return {
+    filename: `zielarka-kopia-${at.slice(0, 10)}.json`,
+    body: sealJson(JSON.stringify({ kind: "pobranie", at, revision: doc.revision, sha, doc })),
+  };
+}
+
+export async function restoreBackup(id: string, expectedRevision: number, phrase: string) {
+  if (phrase.trim() !== "PRZYWRÓĆ") throw new Error("Wpisz PRZYWRÓĆ, żeby potwierdzić.");
+  await createVerifiedBackup("manual");
+  const current = await readForWrite();
+  assertRevision(current.revision, expectedRevision);
+  const blobs = id.startsWith("zielarka/journal/private/") ? await blobList(JOURNAL_PRIVATE) : await blobList(BACKUPS);
+  const found = blobs.find((blob) => blob.pathname === id);
+  if (!found || !readUrl(found)) throw new Error("Nie ma takiej kopii.");
+  const opened = openJson(await fetchJson(readUrl(found))) as { url?: string; doc?: SiteEdits; sha?: string };
+  let restored: SiteEdits;
+  if (opened.doc) {
+    restored = parseDoc(opened.doc);
+    if (opened.sha && payloadSha(canonicalEdits(restored)) !== opened.sha) throw new Error("Kopia jest uszkodzona.");
+  } else if (opened.url) {
+    restored = await fetchDoc(opened.url);
+  } else {
+    throw new Error("Kopia jest uszkodzona.");
+  }
+  restored.revision = current.revision;
+  const revision = await writeEdits(restored);
+  return { revision };
+}
+
+export async function runScheduledBackup(now = new Date()) {
+  const daily = await createVerifiedBackup("daily");
+  if (now.getUTCDate() === 1) await createVerifiedBackup("monthly");
+  return daily;
 }
 
 export { herbs };

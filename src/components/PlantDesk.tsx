@@ -7,6 +7,7 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { slugify, type EntryStatus, type ManagedEntry } from "@/lib/entries";
 import { TypePanel } from "@/components/TypePanel";
+import { BackupPanel } from "@/components/BackupPanel";
 import { herbs } from "@/lib/herbs";
 import {
   adoptServerCopy,
@@ -363,6 +364,7 @@ export function PlantDesk({ onLock }: { onLock: () => void }) {
       </div>
 
       <TypePanel />
+      <BackupPanel />
 
       <section className="mt-10">
         <h2 className="font-display text-2xl text-forest">Już w zielniku</h2>

@@ -40,5 +40,11 @@
       "destination": "https://poczta.seohost.pl/",
       "permanent": false
     }
+  ],
+  "crons": [
+    {
+      "path": "/api/cron/backup",
+      "schedule": "15 3 * * *"
+    }
   ]
 }

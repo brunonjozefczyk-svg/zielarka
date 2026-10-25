@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { assertRevision, attemptBlocked, createAttemptLimiter, herbOutageAction, lockDecision, nextAttempt, publicFallback, toPublicDoc, urlsToPrune } from "./cms-guard.ts";
-import { openJson, sealJson } from "./draft-seal.server.ts";
+import { assertRevision, attemptBlocked, canonicalEdits, classifyLegacy, createAttemptLimiter, draftImageUrls, herbOutageAction, lockDecision, memWrite, migrationAllowed, nextAttempt, publicFallback, restoreAllowed, toPublicDoc, urlsToPrune, urlsToRetain } from "./cms-guard.ts";
+import { openJson, payloadSha, resealJson, sealJson, sealWithEditorPassword } from "./draft-seal.server.ts";
 import { normalizeEntry, plainText, slugify, uniqueSlug } from "./entries.ts";
 import { sitemapXml } from "./sitemap.ts";
 import { sanitizeStyle, sanitizeTheme, textInline, themeAttrs, themeVars } from "./theme.ts";
@@ -118,7 +118,7 @@ test("awaria magazynu nie jest pustą bazą ani 404 karty z kodu", () => {
 });
 
 test("szkic nie występuje w zaszyfrowanym pliku", () => {
-  process.env.EDITOR_PASSWORD = "test-haslo-zielarka";
+  process.env.CMS_SEAL_KEY = Buffer.from("k".repeat(32)).toString("base64");
   const secret = "sekretny szkic mięty";
   const sealed = sealJson(JSON.stringify({ lead: secret, status: "draft" }));
   assert.equal(sealed.includes(secret), false);
@@ -127,6 +127,89 @@ test("szkic nie występuje w zaszyfrowanym pliku", () => {
   assert.equal(opened.lead, secret);
   const plain = { lead: "publiczne" };
   assert.equal(openJson(plain), plain);
+});
+
+test("zmiana hasła nie zamyka dostępu do kopii", () => {
+  process.env.CMS_SEAL_KEY = Buffer.from("n".repeat(32)).toString("base64");
+  process.env.EDITOR_PASSWORD = "stare-haslo-sabiny";
+  const legacy = sealWithEditorPassword(JSON.stringify({ lead: "szkic mięty" }), "stare-haslo-sabiny");
+  process.env.EDITOR_PASSWORD = "nowe-haslo-sabiny";
+  process.env.CMS_SEAL_LEGACY_PASSWORD = "stare-haslo-sabiny";
+  const opened = openJson(JSON.parse(legacy)) as { lead: string };
+  assert.equal(opened.lead, "szkic mięty");
+  const fresh = resealJson(JSON.parse(legacy));
+  delete process.env.CMS_SEAL_LEGACY_PASSWORD;
+  delete process.env.EDITOR_PASSWORD;
+  const again = openJson(JSON.parse(fresh)) as { lead: string };
+  assert.equal(again.lead, "szkic mięty");
+  assert.equal(fresh.includes("szkic"), false);
+});
+
+test("dwa równoczesne zapisy i przerwany zapis", () => {
+  const mem = { lock: null as number | null, privateRev: 3, publicRev: 3, privateBody: "stare", publicBody: "stare-public" };
+  const first = memWrite(mem, 3, "nowe-prywatne", "nowe-publiczne");
+  assert.equal(first.ok, true);
+  assert.equal(mem.publicBody, "nowe-publiczne");
+  const second = memWrite(mem, 3, "cudze", "cudze-public");
+  assert.equal(second.ok, false);
+  if (!second.ok) assert.match(second.message, /Odśwież stronę/);
+  assert.equal(mem.publicBody, "nowe-publiczne");
+  const broken = memWrite(
+    { lock: null, privateRev: 4, publicRev: 4, privateBody: "ok", publicBody: "ok" },
+    4,
+    "przerwane",
+    "niepublikowane",
+    "public-commit",
+  );
+  assert.equal(broken.ok, false);
+  const retry = memWrite(
+    { lock: null, privateRev: 4, publicRev: 4, privateBody: "ok", publicBody: "ok" },
+    4,
+    "ponowne",
+    "ponowne-public",
+  );
+  assert.equal(retry.ok, true);
+});
+
+test("retencja nie kasuje jedynej ani najnowszej kopii", () => {
+  const now = Date.parse("2026-10-25T00:00:00.000Z");
+  const blobs = Array.from({ length: 40 }, (_, index) => ({
+    pathname: `zielarka/backups/manual/${index}.json`,
+    url: `https://x.blob.vercel-storage.com/${index}`,
+    uploadedAt: now - index * 86_400_000,
+    revision: 100 - index,
+  }));
+  const removed = urlsToRetain(blobs);
+  assert.equal(removed.includes("https://x.blob.vercel-storage.com/0"), false);
+  assert.equal(urlsToRetain([{ pathname: "a", url: "https://only", uploadedAt: now, revision: 1 }]).length, 0);
+});
+
+test("stary jawny szkic jest rozpoznany, a migracja czeka na kopię", () => {
+  assert.equal(classifyLegacy("zielarka/private/1.json", { entries: [] }), "plaintext-private");
+  assert.equal(classifyLegacy("zielarka/private/2.json", { sealed: 1 }), "sealed");
+  assert.equal(classifyLegacy("zielarka/content.json", { entries: [{ status: "draft" }] }), "plaintext-private");
+  assert.equal(classifyLegacy("zielarka/public/1.json", { entries: [] }), "public");
+  assert.deepEqual(
+    draftImageUrls({ entries: [{ status: "draft", image: "https://cdn.example/szkic.jpg" }, { status: "published", image: "https://cdn.example/ok.jpg" }] }),
+    ["https://cdn.example/szkic.jpg"],
+  );
+  assert.equal(migrationAllowed(false), false);
+  assert.equal(migrationAllowed(true), true);
+  assert.equal(restoreAllowed("przywróć"), false);
+  assert.equal(restoreAllowed("PRZYWRÓĆ"), true);
+  const doc = {
+    revision: 2,
+    copy: {},
+    images: { hero: "seal:https://hidden" },
+    herbs: {},
+    entries: [{ status: "published", image: "seal:https://hidden", slug: "x" }],
+    theme: null,
+    styles: {},
+  };
+  const pub = toPublicDoc(doc);
+  assert.equal(pub.images.hero, undefined);
+  assert.equal(pub.entries[0].image, "");
+  assert.equal(payloadSha(canonicalEdits(doc)).length, 64);
 });
 
 test("zła czcionka odpada, a puste rozmiary nie zmieniają strony", () => {

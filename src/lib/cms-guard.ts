@@ -1,10 +1,23 @@
 export type StampBlob = { pathname: string; url: string; uploadedAt: number };
 export type AttemptRow = { count: number; until: number };
+export type KeptBlob = { pathname: string; url: string; uploadedAt: number; revision: number };
 
-export function toPublicDoc<T extends { entries: { status: string }[] }>(doc: T): T {
+export function toPublicDoc<T extends { entries: { status: string; image?: string }[]; images?: Record<string, string> }>(
+  doc: T,
+): T {
+  const images = doc.images
+    ? Object.fromEntries(
+        Object.entries(doc.images).filter(([, value]) => typeof value === "string" && !value.startsWith("seal:")),
+      )
+    : doc.images;
   return {
     ...doc,
-    entries: doc.entries.filter((entry) => entry.status === "published"),
+    ...(doc.images ? { images } : {}),
+    entries: doc.entries
+      .filter((entry) => entry.status === "published")
+      .map((entry) =>
+        typeof entry.image === "string" && entry.image.startsWith("seal:") ? { ...entry, image: "" } : entry,
+      ),
   };
 }
 
@@ -25,6 +38,31 @@ export function urlsToPrune(blobs: StampBlob[], keep: number, writtenPath: strin
     .slice(keep)
     .map((blob) => blob.url)
     .filter(Boolean);
+}
+
+/** 20 ostatnich zapisów, 30 dni i 12 miesięcy. Najnowsza kopia nigdy nie wypada. */
+export function urlsToRetain(blobs: KeptBlob[]) {
+  const sorted = [...blobs].sort((a, b) => b.revision - a.revision || b.uploadedAt - a.uploadedAt);
+  if (!sorted.length) return [];
+  const keep = new Set<string>();
+  keep.add(sorted[0].pathname);
+  for (const item of sorted.slice(0, 20)) keep.add(item.pathname);
+  const days = new Set<string>();
+  const months = new Set<string>();
+  for (const item of sorted) {
+    if (!Number.isFinite(item.uploadedAt) || item.uploadedAt <= 0) continue;
+    const day = new Date(item.uploadedAt).toISOString().slice(0, 10);
+    const month = day.slice(0, 7);
+    if (!days.has(day) && days.size < 30) {
+      days.add(day);
+      keep.add(item.pathname);
+    }
+    if (!months.has(month) && months.size < 12) {
+      months.add(month);
+      keep.add(item.pathname);
+    }
+  }
+  return sorted.filter((item) => !keep.has(item.pathname)).map((item) => item.url).filter(Boolean);
 }
 
 export function createAttemptLimiter(max = 8, windowMs = 15 * 60_000) {
@@ -89,4 +127,95 @@ export function publicFallback<T>(cached: T | null, error: unknown): T {
 
 export function herbOutageAction(isBuiltin: boolean): "show-builtin" | "unavailable" {
   return isBuiltin ? "show-builtin" : "unavailable";
+}
+
+export function canonicalEdits(doc: {
+  revision: number;
+  copy: unknown;
+  images: unknown;
+  herbs: unknown;
+  entries: unknown;
+  theme: unknown;
+  styles: unknown;
+}) {
+  return JSON.stringify({
+    revision: doc.revision,
+    copy: doc.copy,
+    images: doc.images,
+    herbs: doc.herbs,
+    entries: doc.entries,
+    theme: doc.theme,
+    styles: doc.styles,
+  });
+}
+
+export type MemStore = {
+  lock: number | null;
+  privateRev: number;
+  publicRev: number;
+  privateBody: string;
+  publicBody: string;
+};
+
+/** Ten sam porządek co zapis w magazynie: publiczna wersja zmienia się na końcu. */
+export function memWrite(
+  mem: MemStore,
+  expected: number,
+  nextPrivate: string,
+  nextPublic: string,
+  failAt?: "private" | "public" | "public-commit",
+): { ok: true; revision: number } | { ok: false; message: string } {
+  const current = mem.privateRev;
+  if (expected !== current || mem.lock === expected) {
+    return { ok: false, message: "Ktoś zapisał w międzyczasie. Odśwież stronę." };
+  }
+  mem.lock = expected;
+  if (failAt === "private") {
+    mem.lock = null;
+    return { ok: false, message: "Zapis nie powiódł się." };
+  }
+  const revision = expected + 1;
+  mem.privateRev = revision;
+  mem.privateBody = nextPrivate;
+  if (failAt === "public" || failAt === "public-commit") {
+    mem.lock = null;
+    return { ok: false, message: "Zapis nie powiódł się." };
+  }
+  mem.publicRev = revision;
+  mem.publicBody = nextPublic;
+  mem.lock = null;
+  return { ok: true, revision };
+}
+
+export function classifyLegacy(pathname: string, json: unknown): "plaintext-private" | "sealed" | "public" | "ignore" {
+  if (pathname.startsWith("zielarka/public/") || pathname.startsWith("zielarka/journal/public/")) return "public";
+  if (pathname.startsWith("zielarka/images/") || pathname.startsWith("zielarka/sealed-images/")) return "ignore";
+  if (pathname.startsWith("zielarka/backups/") || pathname.startsWith("zielarka/locks/")) return "ignore";
+  const privatePlace =
+    pathname === "zielarka/content.json" ||
+    pathname.startsWith("zielarka/docs/") ||
+    pathname.startsWith("zielarka/private/") ||
+    pathname.startsWith("zielarka/journal/private/");
+  if (!privatePlace) return "ignore";
+  const sealed = Boolean(json && typeof json === "object" && (json as { sealed?: unknown }).sealed === 1);
+  return sealed ? "sealed" : "plaintext-private";
+}
+
+export function draftImageUrls(doc: { entries?: { status?: string; image?: string }[] }) {
+  const urls: string[] = [];
+  for (const entry of doc.entries ?? []) {
+    if (entry.status === "published") continue;
+    if (typeof entry.image === "string" && entry.image.startsWith("https://")) urls.push(entry.image);
+  }
+  return urls;
+}
+
+export function migrationAllowed(backupOk: boolean) {
+  return backupOk;
+}
+
+export const RESTORE_PHRASE = "PRZYWRÓĆ";
+
+export function restoreAllowed(phrase: string) {
+  return phrase.trim() === RESTORE_PHRASE;
 }

@@ -231,6 +231,60 @@ export const restoreEditsFn = createServerFn({ method: "POST" })
     return { ok: true as const, revision: restored.revision, message: "" };
   });
 
+export const backupStatusFn = createServerFn({ method: "POST" })
+  .validator((data: { password: string }) => ({ password: data.password ?? "" }))
+  .handler(async ({ data }) => {
+    const result = await gate(data.password);
+    if (!result.ok) return { ok: false as const, at: "", revision: 0, kind: "", rows: [], message: result.message };
+    const { backupStatus, listBackupRows } = await import("./site-store.server");
+    const status = await backupStatus();
+    const rows = await listBackupRows();
+    return { ok: true as const, at: status.at, revision: status.revision, kind: status.kind, rows, message: "" };
+  });
+
+export const createBackupFn = createServerFn({ method: "POST" })
+  .validator((data: { password: string }) => ({ password: data.password ?? "" }))
+  .handler(async ({ data }) => {
+    const result = await gate(data.password);
+    if (!result.ok) return { ok: false as const, at: "", revision: 0, message: result.message };
+    const { createVerifiedBackup } = await import("./site-store.server");
+    const saved = await createVerifiedBackup("manual");
+    return { ok: true as const, at: saved.at, revision: saved.revision, message: "" };
+  });
+
+export const downloadBackupFn = createServerFn({ method: "POST" })
+  .validator((data: { password: string }) => ({ password: data.password ?? "" }))
+  .handler(async ({ data }) => {
+    const result = await gate(data.password);
+    if (!result.ok) return { ok: false as const, filename: "", body: "", message: result.message };
+    const { downloadBackup } = await import("./site-store.server");
+    const file = await downloadBackup();
+    return { ok: true as const, filename: file.filename, body: file.body, message: "" };
+  });
+
+export const restoreBackupFn = createServerFn({ method: "POST" })
+  .validator((data: { password: string; id: string; revision: number; phrase: string }) => ({
+    password: data.password ?? "",
+    id: data.id ?? "",
+    revision: Number(data.revision),
+    phrase: data.phrase ?? "",
+  }))
+  .handler(async ({ data }) => {
+    const result = await gate(data.password);
+    if (!result.ok) return { ok: false as const, revision: data.revision, message: result.message };
+    const { restoreBackup } = await import("./site-store.server");
+    const restored = await restoreBackup(data.id, data.revision, data.phrase);
+    return { ok: true as const, revision: restored.revision, message: "" };
+  });
+
+export const cronBackup = async (authorization: string) => {
+  const secret = process.env.CRON_SECRET?.trim() || "";
+  if (!secret || authorization !== `Bearer ${secret}`) return { ok: false as const, status: 401 };
+  const { runScheduledBackup } = await import("./site-store.server");
+  const saved = await runScheduledBackup();
+  return { ok: true as const, status: 200, at: saved.at };
+};
+
 export { empty };
 
 const CONTACT_TOPICS = new Set(["konsultacja", "warsztat", "spacer", "klub", "inne"]);

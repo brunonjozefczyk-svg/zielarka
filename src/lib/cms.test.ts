@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import test from "node:test";
 import { listAllBlobs, newestRevisionPath, parseBlobListPage, urlsIfComplete } from "./blob-pages.ts";
-import { assertRevision, attemptBlocked, canonicalEdits, classifyLegacy, createAttemptLimiter, draftImageUrls, expiredInboxUrls, herbOutageAction, lockDecision, memWrite, migrationAllowed, migrationPlan, nextAttempt, publicFallback, restoreAllowed, sameRevisionOrUnreadable, toPublicDoc, trustPublicPointer, urlsToPrune, urlsToRetain } from "./cms-guard.ts";
+import { assertRevision, attemptBlocked, canonicalEdits, chooseFreshRead, classifyLegacy, createAttemptLimiter, draftImageUrls, expiredInboxUrls, herbOutageAction, lockDecision, memWrite, migrationAllowed, migrationPlan, nextAttempt, publicFallback, readFailureAction, restoreAllowed, sameRevisionOrUnreadable, STORE_OUTAGE, throwIfUncertain, toPublicDoc, trustPublicPointer, urlsToPrune, urlsToRetain, writeAfterReread } from "./cms-guard.ts";
 import { openJson, payloadSha, resealJson, sealJson, sealWithEditorPassword } from "./draft-seal.server.ts";
 import { normalizeEntry, plainText, slugify, uniqueSlug } from "./entries.ts";
 import { sitemapXml } from "./sitemap.ts";
@@ -394,4 +394,41 @@ test("wskaźnik publiczny, konflikt zapisu i stare wgrywanie", () => {
     active,
   );
   assert.deepEqual(urls, ["https://blob.vercel-storage.com/old"]);
+});
+
+test("chwilowy błąd najnowszej wersji nie cofa zapisu do starszej", () => {
+  assert.equal(readFailureAction(new Error("Odczyt treści nie powiódł się (503).")), "stop");
+  assert.equal(readFailureAction(new Error("Odczyt nie powiódł się (500).")), "stop");
+  assert.equal(readFailureAction(new TypeError("fetch failed")), "stop");
+  assert.equal(readFailureAction(new Error("Nie da się odczytać kopii. Brak klucza k1. Dopisz go do CMS_SEAL_KEYS. Dane nie zostały skasowane.")), "stop");
+  assert.equal(readFailureAction(new Error("Kopia jest uszkodzona.")), "try-older");
+  assert.equal(readFailureAction(new SyntaxError("Unexpected token")), "try-older");
+  const choice = chooseFreshRead([
+    { ok: false as const, error: new Error("Odczyt treści nie powiódł się (503).") },
+    { ok: true as const, value: { revision: 4, lead: "starsza" } },
+  ]);
+  assert.equal(choice.action, "stop");
+  assert.equal(writeAfterReread(new Error(STORE_OUTAGE), null, 6), "stop");
+  assert.equal(writeAfterReread(null, 5, 6), "conflict");
+  assert.equal(writeAfterReread(null, 6, 6), "write");
+  assert.equal(writeAfterReread(new Error("Aktywna treść jest uszkodzona."), null, 6), "write");
+  const damagedHead = chooseFreshRead([
+    { ok: false as const, error: new Error("Kopia jest uszkodzona.") },
+    { ok: true as const, value: { revision: 4, lead: "ostatnia dobra" } },
+  ]);
+  assert.equal(damagedHead.action, "use");
+  if (damagedHead.action === "use") assert.equal(damagedHead.value.revision, 4);
+  assert.throws(() => throwIfUncertain(new Error("Odczyt treści nie powiódł się (503).")), /Nic nie zostało cofnięte/);
+  assert.throws(
+    () => throwIfUncertain(new Error("Nie da się odczytać kopii. Brak klucza k1. Dopisz go do CMS_SEAL_KEYS. Dane nie zostały skasowane.")),
+    /Brak klucza k1/,
+  );
+  assert.doesNotThrow(() => throwIfUncertain(new Error("Kopia jest uszkodzona.")));
+  const editorHad = 6;
+  const duringOutage = chooseFreshRead([
+    { ok: false as const, error: new Error("Odczyt treści nie powiódł się (503).") },
+    { ok: true as const, value: { revision: 4 } },
+  ]);
+  assert.equal(duringOutage.action, "stop");
+  assert.equal(writeAfterReread(new Error(STORE_OUTAGE), null, editorHad), "stop");
 });

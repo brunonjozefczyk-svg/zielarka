@@ -12,6 +12,10 @@ import {
   joinSliceText,
   planBackupRetention,
   plannedRefs,
+  partPath,
+  partCandidates,
+  canReuseSlice,
+  keysRequired,
   recoverBackup,
   restoreGate,
   sha256Bytes,
@@ -24,7 +28,7 @@ import {
   type BackupDoc,
   type BackupFile,
 } from "./backup-bundle.ts";
-import { OFFSITE_AUTOMATIC, offsiteDecision } from "./backup-wire.ts";
+import { OFFSITE_AUTOMATIC, offsiteDecision, offsiteExportAllowed } from "./backup-wire.ts";
 import { openJson, sealJson } from "./draft-seal.server.ts";
 import { parseStoredEntry } from "./entries.ts";
 
@@ -531,4 +535,56 @@ test("wysyłka poza Blob pozostaje wyłączona", () => {
   assert.equal(offsiteDecision("").sent, false);
   assert.equal(imageGoesToPrivateStore("draft"), true);
   assert.equal(imageGoesToPrivateStore("public"), false);
+  assert.equal(offsiteExportAllowed("", "https://r2.example"), false);
+  assert.equal(offsiteExportAllowed("tak", ""), false);
+  assert.equal(offsiteExportAllowed("tak", "https://r2.example"), true);
+  const sha = "ab".repeat(32);
+  assert.notEqual(partPath(sha, 0, "k2"), partPath(sha, 0));
+  assert.equal(partPath(sha, 0, "k2").includes("/k2/"), true);
+});
+
+test("archiwum po rotacji otwiera się aktualnym kluczem i nie nadpisuje starej części", () => {
+  const previousKey = process.env.CMS_SEAL_KEY;
+  const previousKeys = process.env.CMS_SEAL_KEYS;
+  const previousPassword = process.env.EDITOR_PASSWORD;
+  const key1 = randomBytes(32).toString("base64");
+  const key2 = randomBytes(32).toString("base64");
+  const sha = sha256Bytes(PNG);
+  try {
+    process.env.CMS_SEAL_KEY = key1;
+    delete process.env.CMS_SEAL_KEYS;
+    process.env.EDITOR_PASSWORD = "haslo-przed-zmiana";
+    const sealedK1 = sealJson(sliceEnvelope(sha, 0, 1, PNG));
+    assert.equal(JSON.parse(sealedK1).kid, "k1");
+    assert.equal(sealedK1.includes("Sekretna"), false);
+    process.env.CMS_SEAL_KEY = `k2:${key2}`;
+    process.env.CMS_SEAL_KEYS = `k1:${key1}`;
+    process.env.EDITOR_PASSWORD = "inne-haslo";
+    const opened = openJson(JSON.parse(sealedK1)) as { sha256: string; base64: string };
+    assert.equal(opened.sha256, sha);
+    const sealedK2 = sealJson(JSON.stringify(opened));
+    assert.equal(JSON.parse(sealedK2).kid, "k2");
+    assert.notEqual(partPath(sha, 0, "k1"), partPath(sha, 0, "k2"));
+    delete process.env.CMS_SEAL_KEYS;
+    assert.throws(() => openJson(JSON.parse(sealedK1)), /Brak klucza k1/);
+    const again = openJson(JSON.parse(sealedK2)) as { sha256: string; base64: string };
+    assert.equal(again.sha256, sha);
+    assert.equal(Buffer.from(again.base64, "base64").equals(PNG), true);
+    assert.equal(imageGoesToPrivateStore("draft"), true);
+    assert.equal(canReuseSlice("k1", "k2"), false);
+    assert.equal(canReuseSlice("k2", "k2"), true);
+    assert.equal(canReuseSlice("", "k2"), false);
+    assert.deepEqual(partCandidates(sha, 0, "k2"), [partPath(sha, 0, "k2"), partPath(sha, 0)]);
+    assert.deepEqual(keysRequired({ sealKid: "k2", files: [{ kid: "k2" }] }), ["k2"]);
+    assert.deepEqual(keysRequired({ files: [{ kid: "k1" }] }), ["k1"]);
+    assert.equal(partPath(sha, 0, "k1").includes("/k1/"), true);
+    assert.equal(partPath(sha, 0, "k2").includes("/k1/"), false);
+  } finally {
+    if (previousKey === undefined) delete process.env.CMS_SEAL_KEY;
+    else process.env.CMS_SEAL_KEY = previousKey;
+    if (previousKeys === undefined) delete process.env.CMS_SEAL_KEYS;
+    else process.env.CMS_SEAL_KEYS = previousKeys;
+    if (previousPassword === undefined) delete process.env.EDITOR_PASSWORD;
+    else process.env.EDITOR_PASSWORD = previousPassword;
+  }
 });

@@ -92,7 +92,7 @@ export function BackupPanel() {
       if (!result.ok) throw new Error(result.message || "odmowa");
       setEditorRevision(result.revision);
       setPhrase("");
-      toast.success("Przywrócono kopię. Aktualna wersja została wcześniej zabezpieczona.");
+      toast.success(result.message || "Przywrócono kopię.");
       await load();
     } catch (error) {
       toast.error(error instanceof Error && error.message.length < 180 ? error.message : "Nie udało się przywrócić.");
@@ -106,7 +106,10 @@ export function BackupPanel() {
       <p className="text-xs uppercase tracking-[0.18em] text-clay">Ustawienia</p>
       <h2 className="mt-1 font-display text-2xl text-forest">Kopie zapasowe</h2>
       <p className="mt-2 text-sm text-muted">
-        Ostatnia sprawdzona kopia: {when(at)}. Przed przywróceniem powstaje nowa kopia tego, co jest teraz.
+        Ostatnia sprawdzona kopia na serwerze: {when(at)}. Leży w tym samym magazynie co strona, więc nie
+        zastępuje pliku schowanego u Ciebie. Pobrany plik jest zaszyfrowany i ma w środku także zdjęcia.
+        Przywracanie działa nawet wtedy, gdy aktualna treść jest uszkodzona. Jeśli da się ją odczytać, najpierw
+        powstaje jej kopia.
       </p>
       <div className="mt-4 flex flex-wrap gap-3">
         <Button type="button" disabled={busy} onClick={() => void makeCopy()}>
@@ -140,6 +143,44 @@ export function BackupPanel() {
           value={phrase}
           onChange={(event) => setPhrase(event.target.value)}
           autoComplete="off"
+        />
+      </label>
+      <label className="mt-4 block text-sm text-ink">
+        Albo wgraj pobrany plik kopii
+        <input
+          className="mt-1 block w-full text-sm"
+          type="file"
+          accept="application/json,.json"
+          onChange={(event) => {
+            const file = event.target.files?.[0];
+            event.target.value = "";
+            if (!file) return;
+            if (phrase.trim() !== "PRZYWRÓĆ") {
+              toast.error("Wpisz PRZYWRÓĆ wielkimi literami.");
+              return;
+            }
+            setBusy(true);
+            void file
+              .text()
+              .then(async (body) => {
+                if (body.length > 4_000_000) throw new Error("Plik kopii jest za duży na jedno przesłanie.");
+                const password = readEditorPassword();
+                if (!password) return;
+                const { restoreUploadFn } = await import("@/lib/site-api");
+                const result = await restoreUploadFn({
+                  data: { password, body, revision: editorRevision(), phrase },
+                });
+                if (!result.ok) throw new Error(result.message || "odmowa");
+                setEditorRevision(result.revision);
+                setPhrase("");
+                toast.success(result.message || "Przywrócono kopię z pliku.");
+                await load();
+              })
+              .catch((error: unknown) => {
+                toast.error(error instanceof Error && error.message.length < 180 ? error.message : "Nie udało się wgrać kopii.");
+              })
+              .finally(() => setBusy(false));
+          }}
         />
       </label>
       <Button type="button" className="mt-3" variant="outline" disabled={busy || !chosen} onClick={() => void restore()}>

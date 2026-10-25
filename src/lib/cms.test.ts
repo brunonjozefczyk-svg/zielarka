@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { assertRevision, attemptBlocked, canonicalEdits, classifyLegacy, createAttemptLimiter, draftImageUrls, herbOutageAction, lockDecision, memWrite, migrationAllowed, nextAttempt, publicFallback, restoreAllowed, toPublicDoc, urlsToPrune, urlsToRetain } from "./cms-guard.ts";
+import { assertRevision, attemptBlocked, canonicalEdits, classifyLegacy, createAttemptLimiter, draftImageUrls, herbOutageAction, lockDecision, memWrite, migrationAllowed, migrationPlan, nextAttempt, publicFallback, restoreAllowed, toPublicDoc, urlsToPrune, urlsToRetain } from "./cms-guard.ts";
 import { openJson, payloadSha, resealJson, sealJson, sealWithEditorPassword } from "./draft-seal.server.ts";
 import { normalizeEntry, plainText, slugify, uniqueSlug } from "./entries.ts";
 import { sitemapXml } from "./sitemap.ts";
@@ -40,6 +40,9 @@ test("mapa strony ma opublikowane karty i nie ma panelu", () => {
   assert.match(xml, /zielnik\/mieta/);
   assert.match(xml, /<lastmod>2026-10-25<\/lastmod>/);
   assert.doesNotMatch(xml, /edytuj/);
+  const escaped = sitemapXml({ herbs: ["a&b"], entries: [] });
+  assert.match(escaped, /a\u0026amp;b/);
+  assert.doesNotMatch(escaped, /a\u0026b/);
 });
 
 test("publiczny zapis nie zawiera szkiców", () => {
@@ -193,8 +196,23 @@ test("stary jawny szkic jest rozpoznany, a migracja czeka na kopię", () => {
     draftImageUrls({ entries: [{ status: "draft", image: "https://cdn.example/szkic.jpg" }, { status: "published", image: "https://cdn.example/ok.jpg" }] }),
     ["https://cdn.example/szkic.jpg"],
   );
-  assert.equal(migrationAllowed(false), false);
-  assert.equal(migrationAllowed(true), true);
+  assert.equal(migrationAllowed(false, true), false);
+  assert.equal(migrationAllowed(true, false), false);
+  assert.equal(migrationAllowed(true, true), true);
+  const plan = migrationPlan(
+    [
+      { pathname: "zielarka/content.json", json: { entries: [{ status: "draft", image: "https://cdn.example/szkic.jpg" }] } },
+      { pathname: "zielarka/private/2.json", json: { sealed: 1 } },
+    ],
+    true,
+    true,
+  );
+  assert.equal(plan.run, false);
+  assert.equal(plan.ready, true);
+  assert.equal(plan.steps.some((step) => step.action === "reseal-plaintext"), true);
+  assert.equal(plan.steps.some((step) => step.action === "seal-draft-image"), true);
+  assert.equal(migrationPlan([], false, true).run, false);
+  assert.equal(migrationPlan([], true, false).ready, false);
   assert.equal(restoreAllowed("przywróć"), false);
   assert.equal(restoreAllowed("PRZYWRÓĆ"), true);
   const doc = {

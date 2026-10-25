@@ -274,7 +274,26 @@ export const restoreBackupFn = createServerFn({ method: "POST" })
     if (!result.ok) return { ok: false as const, revision: data.revision, message: result.message };
     const { restoreBackup } = await import("./site-store.server");
     const restored = await restoreBackup(data.id, data.revision, data.phrase);
-    return { ok: true as const, revision: restored.revision, message: "" };
+    return { ok: true as const, revision: restored.revision, message: restored.message };
+  });
+
+export const restoreUploadFn = createServerFn({ method: "POST" })
+  .validator((data: { password?: string; body?: string; revision?: number; phrase?: string }) => {
+    const body = data.body ?? "";
+    if (body.length > 4_000_000) throw new Error("Plik kopii jest za duży na jedno przesłanie.");
+    return {
+      password: data.password ?? "",
+      body,
+      revision: Number(data.revision),
+      phrase: data.phrase ?? "",
+    };
+  })
+  .handler(async ({ data }) => {
+    const result = await gate(data.password);
+    if (!result.ok) return { ok: false as const, revision: data.revision, message: result.message };
+    const { restoreUploadedBackup } = await import("./site-store.server");
+    const restored = await restoreUploadedBackup(data.body, data.revision, data.phrase);
+    return { ok: true as const, revision: restored.revision, message: restored.message };
   });
 
 export const cronBackup = async (authorization: string) => {

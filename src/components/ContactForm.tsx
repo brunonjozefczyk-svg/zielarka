@@ -35,28 +35,44 @@ export function ContactForm() {
       toast("Uzupełnij imię, e-mail i wiadomość.");
       return;
     }
+    if (draft.message.trim().length < 10) {
+      toast("Napisz choć jedno zdanie. Wiadomość jest za krótka.");
+      return;
+    }
+    if (company) {
+      setSent(true);
+      setDraft(empty);
+      return;
+    }
+    const topic = TOPICS.find((item) => item.value === draft.topic)?.label ?? "Inne";
     setSending(true);
-    void import("@/lib/site-api")
-      .then(({ sendContactFn }) =>
-        sendContactFn({
-          data: {
-            name: draft.name,
-            email: draft.email,
-            topic: draft.topic,
-            message: draft.message,
-            company,
-          },
-        }),
-      )
-      .then((result) => {
-        if (!result.ok) {
-          toast.error(result.message || "Nie udało się wysłać. Spróbuj jeszcze raz.");
+    void fetch("https://formsubmit.co/ajax/kontakt@zielarka.pl", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify({
+        name: draft.name.trim(),
+        email: draft.email.trim(),
+        _replyto: draft.email.trim(),
+        _subject: `Zielarka.pl — ${topic} — ${draft.name.trim()}`,
+        temat: topic,
+        message: draft.message.trim(),
+        _template: "table",
+        _captcha: "false",
+      }),
+    })
+      .then(async (response) => {
+        const body = (await response.json().catch(() => ({}))) as {
+          success?: string;
+          message?: string;
+        };
+        if (String(body.success) !== "true") {
+          toast.error(body.message || "Nie udało się wysłać. Spróbuj jeszcze raz.");
           return;
         }
         setSent(true);
         setDraft(empty);
       })
-      .catch(() => toast.error("Nie udało się wysłać. Spróbuj jeszcze raz."))
+      .catch(() => toast.error("Nie udało się wysłać. Sprawdź internet i spróbuj jeszcze raz."))
       .finally(() => setSending(false));
   }
 

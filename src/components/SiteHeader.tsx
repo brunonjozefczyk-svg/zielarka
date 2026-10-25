@@ -1,24 +1,22 @@
 import { useEffect, useState } from "react";
 import { Link, useRouterState } from "@tanstack/react-router";
 import { Menu, Pencil, X } from "lucide-react";
-import { toast } from "sonner";
 import { Mark } from "@/components/Mark";
 import { Button } from "@/components/ui/button";
 import { nav } from "@/lib/content";
-import { readEditorPassword, useEditMode, writeEditorPassword } from "@/lib/site-editor";
+import { readEditorPassword, useEditMode } from "@/lib/site-editor";
 import { cn } from "@/lib/utils";
 
 export function SiteHeader() {
   const [open, setOpen] = useState(false);
-  const [askPassword, setAskPassword] = useState(false);
-  const [password, setPassword] = useState("");
-  const [checking, setChecking] = useState(false);
+  const [unlocked, setUnlocked] = useState(false);
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const { editing, setEditing } = useEditMode();
 
   useEffect(() => {
     setOpen(false);
-  }, [pathname]);
+    setUnlocked(Boolean(readEditorPassword()));
+  }, [pathname, editing]);
 
   useEffect(() => {
     document.body.style.overflow = open ? "hidden" : "";
@@ -62,28 +60,19 @@ export function SiteHeader() {
         </nav>
 
         <div className="flex items-center gap-2">
-          <button
-            type="button"
-            className={cn(
-              "inline-flex min-h-11 items-center gap-1.5 rounded-md px-3 text-sm font-medium",
-              editing ? "bg-forest text-cream" : "border border-forest text-forest",
-            )}
-            onClick={() => {
-              if (editing) {
-                setEditing(false);
-                return;
-              }
-              if (readEditorPassword()) {
-                setEditing(true);
-                return;
-              }
-              setPassword("");
-              setAskPassword(true);
-            }}
-          >
-            <Pencil className="size-4" />
-            {editing ? "Gotowe" : "Edytuj"}
-          </button>
+          {unlocked ? (
+            <button
+              type="button"
+              className={cn(
+                "inline-flex min-h-11 items-center gap-1.5 rounded-md px-3 text-sm font-medium",
+                editing ? "bg-forest text-cream" : "border border-forest text-forest",
+              )}
+              onClick={() => setEditing(!editing)}
+            >
+              <Pencil className="size-4" />
+              {editing ? "Gotowe" : "Edytuj"}
+            </button>
+          ) : null}
           <Button asChild size="sm" className="hidden sm:inline-flex">
             <Link to="/kontakt">Umów konsultację</Link>
           </Button>
@@ -120,50 +109,6 @@ export function SiteHeader() {
             </Button>
           </nav>
         </div>
-      ) : null}
-      {askPassword ? (
-        <form
-          className="border-t border-line bg-cream px-4 py-4"
-          onSubmit={(event) => {
-            event.preventDefault();
-            const next = password.trim();
-            if (!next) return;
-            setChecking(true);
-            void import("@/lib/site-api")
-              .then(({ checkEditorPassword }) => checkEditorPassword({ data: { password: next } }))
-              .then((result) => {
-                if (!result.ok) {
-                  toast.error("Złe hasło.");
-                  return;
-                }
-                writeEditorPassword(next);
-                setAskPassword(false);
-                setEditing(true);
-              })
-              .catch(() => toast.error("Nie udało się sprawdzić hasła."))
-              .finally(() => setChecking(false));
-          }}
-        >
-          <label className="block text-sm text-ink" htmlFor="editor-password">
-            Hasło do edycji
-          </label>
-          <div className="mt-2 flex flex-wrap gap-2">
-            <input
-              id="editor-password"
-              type="password"
-              autoComplete="current-password"
-              value={password}
-              onChange={(event) => setPassword(event.target.value)}
-              className="min-h-11 flex-1 rounded-md border border-line bg-paper px-3"
-            />
-            <Button type="submit" disabled={checking}>
-              {checking ? "Sprawdzam…" : "Otwórz"}
-            </Button>
-            <Button type="button" variant="outline" onClick={() => setAskPassword(false)}>
-              Anuluj
-            </Button>
-          </div>
-        </form>
       ) : null}
     </header>
   );

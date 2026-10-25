@@ -10,6 +10,7 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as EdytujRouteImport } from './routes/edytuj'
 import { Route as KlubRouteImport } from './routes/klub'
 import { Route as KonsultacjeRouteImport } from './routes/konsultacje'
 import { Route as KontaktRouteImport } from './routes/kontakt'
@@ -22,6 +23,11 @@ import { Route as ZielnikSlugRouteImport } from './routes/zielnik.$slug'
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const EdytujRoute = EdytujRouteImport.update({
+  id: '/edytuj',
+  path: '/edytuj',
   getParentRoute: () => rootRouteImport,
 } as any)
 const KlubRoute = KlubRouteImport.update({
@@ -67,6 +73,7 @@ const ZielnikSlugRoute = ZielnikSlugRouteImport.update({
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/edytuj': typeof EdytujRoute
   '/klub': typeof KlubRoute
   '/konsultacje': typeof KonsultacjeRoute
   '/kontakt': typeof KontaktRoute
@@ -78,6 +85,7 @@ export interface FileRoutesByFullPath {
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/edytuj': typeof EdytujRoute
   '/klub': typeof KlubRoute
   '/konsultacje': typeof KonsultacjeRoute
   '/kontakt': typeof KontaktRoute
@@ -89,6 +97,7 @@ export interface FileRoutesByTo {
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/edytuj': typeof EdytujRoute
   '/klub': typeof KlubRoute
   '/konsultacje': typeof KonsultacjeRoute
   '/kontakt': typeof KontaktRoute
@@ -102,6 +111,7 @@ export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
     | '/'
+    | '/edytuj'
     | '/klub'
     | '/konsultacje'
     | '/kontakt'
@@ -113,6 +123,7 @@ export interface FileRouteTypes {
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
+    | '/edytuj'
     | '/klub'
     | '/konsultacje'
     | '/kontakt'
@@ -123,6 +134,7 @@ export interface FileRouteTypes {
   id:
     | '__root__'
     | '/'
+    | '/edytuj'
     | '/klub'
     | '/konsultacje'
     | '/kontakt'
@@ -135,6 +147,7 @@ export interface FileRouteTypes {
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  EdytujRoute: typeof EdytujRoute
   KlubRoute: typeof KlubRoute
   KonsultacjeRoute: typeof KonsultacjeRoute
   KontaktRoute: typeof KontaktRoute
@@ -150,6 +163,13 @@ declare module '@tanstack/react-router' {
       path: '/'
       fullPath: '/'
       preLoaderRoute: typeof IndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/edytuj': {
+      id: '/edytuj'
+      path: '/edytuj'
+      fullPath: '/edytuj'
+      preLoaderRoute: typeof EdytujRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/klub': {
@@ -226,6 +246,7 @@ const ZielnikRouteWithChildren =
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  EdytujRoute: EdytujRoute,
   KlubRoute: KlubRoute,
   KonsultacjeRoute: KonsultacjeRoute,
   KontaktRoute: KontaktRoute,

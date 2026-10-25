@@ -70,9 +70,12 @@ export function EditableText({
                     toast.error("Tekst nie może być pusty.");
                     return;
                   }
-                  saveCopy(id, next);
-                  setOpen(false);
-                  toast.success("Zapisane na tym telefonie.");
+                  void saveCopy(id, next)
+                    .then(() => {
+                      setOpen(false);
+                      toast.success("Zapisane. Widać to też na innych telefonach.");
+                    })
+                    .catch(() => toast.error("Nie udało się zapisać. Sprawdź hasło i sieć."));
                 }}
               >
                 Zapisz

@@ -41,7 +41,7 @@ export function EditableImage({
     try {
       const dataUrl = await resizeImageFile(file);
       await saveImage(id, dataUrl);
-      toast.success("Zdjęcie zmienione na tym telefonie.");
+      toast.success("Zdjęcie zapisane. Widać je też na innych telefonach.");
     } catch {
       toast.error("Nie udało się wczytać zdjęcia.");
     } finally {

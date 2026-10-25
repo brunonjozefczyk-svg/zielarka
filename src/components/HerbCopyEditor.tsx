@@ -12,11 +12,15 @@ import {
   saveHerbCopy,
   type HerbCopy,
 } from "@/lib/herb-editor";
+import { useEditMode } from "@/lib/site-editor";
 import type { Herb } from "@/lib/herbs";
 
 export function HerbCopyEditor({ herb }: { herb: Herb }) {
+  const { editing } = useEditMode();
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState<HerbCopy>(() => copyFromHerb(herb));
+
+  if (!editing) return null;
 
   function start() {
     setDraft(copyFromHerb(herb));
@@ -39,23 +43,27 @@ export function HerbCopyEditor({ herb }: { herb: Herb }) {
       toast.error("Tytuł SEO, opis SEO i wstęp nie mogą być puste.");
       return;
     }
-    saveHerbCopy(herb.slug, {
+    void saveHerbCopy(herb.slug, {
       ...draft,
       seoTitle,
       seoDescription,
       lead,
       note: draft.note.trim(),
       faqs: draft.faqs.map((item) => ({ q: item.q.trim(), a: item.a.trim() })),
-    });
-    toast.success("Zapisane na tym telefonie.");
-    setOpen(false);
+    })
+      .then(() => {
+        toast.success("Zapisane. Widać to też na innych telefonach.");
+        setOpen(false);
+      })
+      .catch(() => toast.error("Nie udało się zapisać. Sprawdź hasło i sieć."));
   }
 
   function revert() {
-    resetHerbCopy(herb.slug);
-    setDraft(copyFromHerb(herb));
-    toast.success("Wraca oryginalny opis.");
-    setOpen(false);
+    void resetHerbCopy(herb.slug).then(() => {
+      setDraft(copyFromHerb(herb));
+      toast.success("Wraca oryginalny opis.");
+      setOpen(false);
+    });
   }
 
   return (
@@ -77,8 +85,7 @@ export function HerbCopyEditor({ herb }: { herb: Herb }) {
             <div>
               <p className="text-xs uppercase tracking-[0.16em] text-clay">Twoja edycja</p>
               <p className="mt-1 max-w-md text-sm text-muted">
-                Zapis zostaje na tym urządzeniu. Żeby weszło na zielarka.pl — wyślij mi plik albo
-                wklej tekst.
+                Zapis idzie na stronę. Po zapisaniu zobaczy go każdy.
               </p>
             </div>
             <button

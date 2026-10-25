@@ -52,22 +52,42 @@ function writeAll(data: Record<string, HerbCopy>) {
   window.dispatchEvent(new Event("zielarka-herb-copy"));
 }
 
+export function applyRemoteHerbs(herbsCopy: Record<string, unknown>) {
+  if (typeof window === "undefined") return;
+  const current = readAll();
+  for (const [slug, copy] of Object.entries(herbsCopy)) {
+    if (copy && typeof copy === "object") current[slug] = copy as HerbCopy;
+  }
+  writeAll(current);
+}
+
+export async function saveHerbCopy(slug: string, copy: HerbCopy) {
+  const all = readAll();
+  all[slug] = copy;
+  writeAll(all);
+  const { readEditorPassword } = await import("./site-editor");
+  const password = readEditorPassword();
+  if (!password) throw new Error("brak hasła");
+  const { saveHerbFn } = await import("./site-api");
+  const result = await saveHerbFn({ data: { password, slug, copy } });
+  if (!result.ok) throw new Error("odmowa");
+}
+
 export function mergeHerb(herb: Herb): Herb {
   const over = readAll()[herb.slug];
   if (!over) return herb;
   return { ...herb, ...over };
 }
 
-export function saveHerbCopy(slug: string, copy: HerbCopy) {
-  const all = readAll();
-  all[slug] = copy;
-  writeAll(all);
-}
-
-export function resetHerbCopy(slug: string) {
+export async function resetHerbCopy(slug: string) {
   const all = readAll();
   delete all[slug];
   writeAll(all);
+  const { readEditorPassword } = await import("./site-editor");
+  const password = readEditorPassword();
+  if (!password) return;
+  const { saveHerbFn } = await import("./site-api");
+  await saveHerbFn({ data: { password, slug, copy: null } });
 }
 
 export function hasHerbCopy(slug: string) {

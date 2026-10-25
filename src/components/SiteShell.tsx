@@ -1,8 +1,20 @@
-import type { ReactNode } from "react";
+import { useEffect, type ReactNode } from "react";
 import { SiteFooter } from "@/components/SiteFooter";
 import { SiteHeader } from "@/components/SiteHeader";
+import { applyRemoteHerbs } from "@/lib/herb-editor";
+import { applyRemoteCopy, applyRemoteImages } from "@/lib/site-editor";
 
 export function SiteShell({ children }: { children: ReactNode }) {
+  useEffect(() => {
+    void import("@/lib/site-api")
+      .then(({ loadSiteEdits }) => loadSiteEdits())
+      .then(async (data) => {
+        applyRemoteCopy(data.copy);
+        applyRemoteHerbs(data.herbs);
+        await applyRemoteImages(data.images);
+      })
+      .catch(() => undefined);
+  }, []);
   return (
     <div className="flex min-h-screen flex-col bg-paper">
       <a

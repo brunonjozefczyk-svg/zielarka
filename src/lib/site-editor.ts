@@ -5,6 +5,7 @@ const MODE_KEY = "zielarka.edit-mode";
 const EVENT = "zielarka-site-editor";
 const DB_NAME = "zielarka-editor-v2";
 const STORE = "images";
+const PASS_KEY = "zielarka.editor-pass";
 
 function emit() {
   window.dispatchEvent(new Event(EVENT));
@@ -19,11 +20,25 @@ export function readCopy(): Record<string, string> {
   }
 }
 
-export function saveCopy(id: string, value: string) {
+export function readEditorPassword() {
+  if (typeof sessionStorage === "undefined") return "";
+  return sessionStorage.getItem(PASS_KEY) || "";
+}
+
+export function writeEditorPassword(password: string) {
+  sessionStorage.setItem(PASS_KEY, password);
+}
+
+export async function saveCopy(id: string, value: string) {
   const all = readCopy();
   all[id] = value;
   localStorage.setItem(COPY_KEY, JSON.stringify(all));
   emit();
+  const password = readEditorPassword();
+  if (!password) throw new Error("brak hasła");
+  const { saveSiteCopyFn } = await import("./site-api");
+  const result = await saveSiteCopyFn({ data: { password, id, value } });
+  if (!result.ok) throw new Error("odmowa");
 }
 
 export function getCopy(id: string, fallback: string) {
@@ -70,6 +85,44 @@ export async function saveImage(id: string, dataUrl: string) {
     req.onsuccess = () => resolve();
     req.onerror = () => reject(req.error);
   });
+  emit();
+  const password = readEditorPassword();
+  if (!password) throw new Error("brak hasła");
+  const { saveSiteImageFn } = await import("./site-api");
+  const result = await saveSiteImageFn({ data: { password, id, dataUrl } });
+  if (!result.ok) throw new Error("odmowa");
+  if (result.url) {
+    await new Promise<void>((resolve, reject) => {
+      const req = db.transaction(STORE, "readwrite").objectStore(STORE).put(result.url, id);
+      req.onsuccess = () => resolve();
+      req.onerror = () => reject(req.error);
+    });
+    emit();
+  }
+}
+
+export function applyRemoteCopy(copy: Record<string, string>) {
+  if (typeof window === "undefined") return;
+  const next = { ...readCopy(), ...copy };
+  localStorage.setItem(COPY_KEY, JSON.stringify(next));
+  emit();
+}
+
+export async function applyRemoteImages(images: Record<string, string>) {
+  if (typeof indexedDB === "undefined") return;
+  const entries = Object.entries(images).filter(([, url]) => url.startsWith("https://"));
+  if (!entries.length) return;
+  const db = await openDb();
+  await Promise.all(
+    entries.map(
+      ([id, url]) =>
+        new Promise<void>((resolve, reject) => {
+          const req = db.transaction(STORE, "readwrite").objectStore(STORE).put(url, id);
+          req.onsuccess = () => resolve();
+          req.onerror = () => reject(req.error);
+        }),
+    ),
+  );
   emit();
 }
 

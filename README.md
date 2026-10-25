@@ -2,6 +2,13 @@
 
 Strona Sabiny Józefczyk, zielarki-fitoterapeutki, razem z edytorem.
 
-Przycisk **Edytuj** zmienia teksty i zdjęcia. Zapis jest w przeglądarce na tym urządzeniu.
+Przycisk **Edytuj** na stronie zmienia teksty i zdjęcia. Zapis zostaje w przeglądarce na tym urządzeniu.
 
-To repozytorium to kod. Sam GitHub strony w internecie nie uruchamia — do publikacji potrzebny jest Vercel.
+## Uruchomienie
+
+```bash
+npm install
+npm run dev
+```
+
+To repozytorium to kod strony. Sam GitHub jej nie publikuje — do adresu w internecie potrzebny jest hosting (Vercel).

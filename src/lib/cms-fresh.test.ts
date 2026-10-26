@@ -235,8 +235,13 @@ test("świeży Blob: 404, zła suma, przerwana publikacja i odtworzenie", async 
     resetPublicCacheForTests();
     beforeGate = calls.length;
     const withoutPointer = await readPublicEdits();
-    assert.equal(withoutPointer.revision, 0);
-    assert.equal(calls.slice(beforeGate).some((item) => item.startsWith("LIST")), false, "brak wskaźnika nie listuje dziennika");
+    assert.equal(withoutPointer.copy["home.note"], "mieta");
+    assert.ok(withoutPointer.revision >= 1);
+    assert.equal(
+      calls.slice(beforeGate).some((item) => item.startsWith("LIST zielarka/journal/public")),
+      false,
+      "brak wskaźnika nie przegląda całego dziennika publicznego",
+    );
     files.set(pointerPath, keptPointer);
     resetPublicCacheForTests();
     assert.equal((await readPublicEdits()).copy["home.note"], "mieta");

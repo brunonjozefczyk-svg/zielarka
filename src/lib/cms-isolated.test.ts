@@ -3,11 +3,13 @@
  * To nie jest Vercel Blob i nie jest magazyn Sabiny. Żądanie poza atrapę jest błędem.
  */
 import assert from "node:assert/strict";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { writeFileSync } from "node:fs";
 import test from "node:test";
 import { canonicalEdits } from "./cms-guard.ts";
 import { openJson, payloadSha, sealJson } from "./draft-seal.server.ts";
+import { herbs } from "./herbs.ts";
+import { sitemapXml } from "./sitemap.ts";
 import {
   beginRestoreUpload,
   createVerifiedBackup,
@@ -57,6 +59,7 @@ test("izolowany CMS: edytor, kopia, utrata magazynu i koszt listy", async () => 
   const files = new Map<string, Row>();
   const calls: string[] = [];
   let outage = false;
+  let failList = 0;
   let clock = 1_700_000_000_000;
   const original = globalThis.fetch;
 
@@ -127,6 +130,10 @@ test("izolowany CMS: edytor, kopia, utrata magazynu i koszt listy", async () => 
       });
     }
     const prefix = url.searchParams.get("prefix") || "";
+    if (failList) {
+      calls.push(`LIST-FAIL ${failList} ${prefix}`);
+      return new Response("limit", { status: failList });
+    }
     const limit = Number(url.searchParams.get("limit") || "1000");
     const start = Number(url.searchParams.get("cursor") || "0");
     const matched = [...files.entries()]
@@ -396,7 +403,7 @@ test("izolowany CMS: edytor, kopia, utrata magazynu i koszt listy", async () => 
     const beforeLegacy = calls.length;
     const hiddenLegacy = await readPublicEdits();
     assert.equal(hiddenLegacy.revision, 0);
-    assert.equal(calls.slice(beforeLegacy).some((item) => item.startsWith("LIST ")), false);
+    assert.equal(calls.slice(beforeLegacy).some((item) => item.startsWith("LIST zielarka/journal/public")), false);
     const looked = await diagnosePublicCutover();
     assert.equal(looked.action, "ready");
     assert.equal(looked.revision, 2);
@@ -429,6 +436,233 @@ test("izolowany CMS: edytor, kopia, utrata magazynu i koszt listy", async () => 
     assert.equal(files.has("zielarka/journal/public/current.json"), false);
     const stillHidden = await readPublicEdits();
     assert.notEqual(stillHidden.revision, 9);
+    assert.equal(stillHidden.revision, 2);
+
+    files.clear();
+    resetPublicCacheForTests();
+    const imageBytes = Buffer.from(PNG);
+    const privateImage = Buffer.from(DRAFT_PNG);
+    files.set("zielarka/images/pokrzywa-polna.png", { body: imageBytes, uploadedAt: 10 });
+    files.set("zielarka/images/szkic-polny.png", { body: privateImage, uploadedAt: 11 });
+    const imageUrl = urlFor("zielarka/images/pokrzywa-polna.png");
+    const draftUrl = urlFor("zielarka/images/szkic-polny.png");
+    const publishedEntry = {
+      slug: "pokrzywa-polna",
+      status: "published",
+      name: "Pokrzywa polna",
+      latin: "Urtica urens",
+      lead: "Liście na napar.",
+      note: "Na herbatę.",
+      season: "wiosna",
+      part: "liść",
+      habitat: "przydroża",
+      recognize: "włoski parzące",
+      harvest: "przed kwitnieniem",
+      prepare: "suszyć w cieniu",
+      tradition: "wiosna",
+      caution: "nie w ciąży",
+      seoTitle: "Pokrzywa polna | Zielarka.pl",
+      seoDescription: "Jak rozpoznać pokrzywę polną.",
+      alt: "Liść pokrzywy polnej",
+      image: imageUrl,
+      faqs: [{ q: "Kiedy zbierać?", a: "Wiosną, przed kwitnieniem." }],
+      related: ["pokrzywa"],
+      updatedAt: "2026-08-01T10:00:00.000Z",
+      history: [{ at: "2026-07-01T10:00:00.000Z", name: "Pokrzywa polna", lead: "pierwsza notatka", status: "published" }],
+    };
+    const draftEntry = {
+      ...publishedEntry,
+      slug: "szkic-polny",
+      status: "draft",
+      name: "Szkic polny",
+      lead: "ten opis ma zostać prywatny",
+      seoTitle: "Szkic polny",
+      seoDescription: "Nie indeksować.",
+      image: draftUrl,
+      updatedAt: "2026-08-02T10:00:00.000Z",
+      history: [],
+    };
+    const older = {
+      copy: { "home.note": "nie-laczyc" },
+      images: {},
+      herbs: {},
+      entries: [{ ...publishedEntry, slug: "stara-karta", name: "Stara karta", status: "published" }],
+    };
+    const currentMain = {
+      copy: { "home.note": "z-produkcji", "seo.title": "Zielarka z CMS" },
+      images: { "img.home": imageUrl, "img.herb.szkic-polny": draftUrl, "img.herb.pokrzywa-polna": imageUrl },
+      herbs: { pokrzywa: { lead: "opis pokrzywy z cms" } },
+      entries: [publishedEntry, draftEntry],
+    };
+    files.set("zielarka/docs/1700000000000-aaaaaa.json", { body: Buffer.from(JSON.stringify(older)), uploadedAt: 20 });
+    files.set("zielarka/docs/1700000001000-bbbbbb.json", { body: Buffer.from(JSON.stringify(currentMain)), uploadedAt: 30 });
+    files.set("zielarka/content.json", {
+      body: Buffer.from(JSON.stringify({ ...older, copy: { "home.note": "sam-content" } })),
+      uploadedAt: 40,
+    });
+    const locs = (xml: string) => [...xml.matchAll(/<loc>(.*?)<\/loc>/g)].map((match) => match[1]);
+    resetPublicCacheForTests();
+    const beforeMove = await readPublicEdits();
+    assert.equal(beforeMove.copy["home.note"], "z-produkcji");
+    assert.equal(beforeMove.copy["seo.title"], "Zielarka z CMS");
+    assert.equal(beforeMove.herbs.pokrzywa && (beforeMove.herbs.pokrzywa as { lead: string }).lead, "opis pokrzywy z cms");
+    assert.equal(beforeMove.entries.some((entry) => entry.slug === "pokrzywa-polna"), true);
+    assert.equal(beforeMove.entries.some((entry) => entry.slug === "stara-karta"), false);
+    assert.equal(beforeMove.entries.some((entry) => entry.slug === "szkic-polny"), false);
+    assert.equal(JSON.stringify(beforeMove).includes("ten opis ma zostać prywatny"), false);
+    assert.equal(JSON.stringify(beforeMove).includes(draftUrl), false);
+    const shown = beforeMove.entries.find((entry) => entry.slug === "pokrzywa-polna");
+    assert.ok(shown);
+    assert.equal(shown.seoTitle, "Pokrzywa polna | Zielarka.pl");
+    assert.equal(shown.seoDescription, "Jak rozpoznać pokrzywę polną.");
+    assert.equal(shown.history[0]?.lead, "pierwsza notatka");
+    const seenBytes = Buffer.from(await (await fetch(shown.image)).arrayBuffer());
+    assert.equal(createHash("sha256").update(seenBytes).digest("hex"), createHash("sha256").update(imageBytes).digest("hex"));
+    const beforeXml = sitemapXml({
+      herbs: herbs.map((herb) => herb.slug),
+      entries: beforeMove.entries.map((entry) => ({ slug: entry.slug, updatedAt: entry.updatedAt })),
+    });
+    const beforeLocs = locs(beforeXml);
+    assert.ok(beforeLocs.includes("https://zielarka.pl/zielnik/pokrzywa-polna"));
+    assert.equal(beforeLocs.includes("https://zielarka.pl/zielnik/szkic-polny"), false);
+    assert.ok(beforeLocs.length > 6);
+    const firstLook = await diagnosePublicCutover();
+    assert.equal(firstLook.action, "ready");
+    assert.equal(firstLook.source, "main");
+    const putsBefore = calls.filter((item) => item.startsWith("PUT")).length;
+    const secondLook = await diagnosePublicCutover();
+    assert.equal(secondLook.action, "ready");
+    assert.equal(calls.filter((item) => item.startsWith("PUT")).length, putsBefore);
+    assert.equal(files.has("zielarka/journal/public/current.json"), false);
+    const pausedMain = await applyPublicCutover(false);
+    assert.equal(pausedMain.action, "ready");
+    assert.equal(files.has("zielarka/journal/public/current.json"), false);
+    assert.equal(files.has("zielarka/docs/1700000001000-bbbbbb.json"), true);
+    const promotedMain = await applyPublicCutover(true);
+    assert.equal(promotedMain.action, "already");
+    assert.equal(files.has("zielarka/docs/1700000001000-bbbbbb.json"), true);
+    assert.equal(files.has("zielarka/content.json"), true);
+    assert.equal(files.get("zielarka/images/pokrzywa-polna.png")?.body.equals(imageBytes), true);
+    assert.equal(files.get("zielarka/images/szkic-polny.png")?.body.equals(privateImage), true);
+    const oldRaw = files.get("zielarka/docs/1700000001000-bbbbbb.json")?.body.toString("utf8") || "";
+    assert.equal(oldRaw.includes("Szkic polny"), true);
+    resetPublicCacheForTests();
+    const afterMove = await readPublicEdits();
+    assert.equal(afterMove.entries.some((entry) => entry.slug === "pokrzywa-polna"), true);
+    assert.equal(afterMove.entries.some((entry) => entry.slug === "szkic-polny"), false);
+    assert.equal(afterMove.copy["home.note"], "z-produkcji");
+    assert.equal(JSON.stringify(afterMove).includes("ten opis ma zostać prywatny"), false);
+    const afterXml = sitemapXml({
+      herbs: herbs.map((herb) => herb.slug),
+      entries: afterMove.entries.map((entry) => ({ slug: entry.slug, updatedAt: entry.updatedAt })),
+    });
+    assert.deepEqual(locs(afterXml), beforeLocs);
+    const quiet = calls.length;
+    resetPublicCacheForTests();
+    await readPublicEdits();
+    assert.equal(calls.slice(quiet).some((item) => item.startsWith("LIST")), false);
+    const editorAfter = await readEditorDoc();
+    assert.equal(editorAfter.entries.some((entry) => entry.slug === "szkic-polny" && entry.status === "draft"), true);
+    assert.equal(editorAfter.entries.find((entry) => entry.slug === "pokrzywa-polna")?.history[0]?.lead, "pierwsza notatka");
+    const againMain = await applyPublicCutover(true);
+    assert.equal(againMain.action, "already");
+    assert.equal(againMain.revision, promotedMain.revision);
+    const publicDocs = [...files.keys()].filter((path) => path.startsWith("zielarka/public/"));
+    assert.equal(publicDocs.length, 1);
+
+    files.clear();
+    resetPublicCacheForTests();
+    files.set("zielarka/content.json", {
+      body: Buffer.from(JSON.stringify({ ...currentMain, copy: { "home.note": "tylko-content" } })),
+      uploadedAt: 5,
+    });
+    const fromContent = await readPublicEdits();
+    assert.equal(fromContent.copy["home.note"], "tylko-content");
+    assert.equal(fromContent.entries.some((entry) => entry.slug === "pokrzywa-polna"), true);
+    assert.equal(fromContent.entries.some((entry) => entry.slug === "szkic-polny"), false);
+
+    files.set("zielarka/docs/1700000002000-cccccc.json", {
+      body: Buffer.from("{to-nie-jest-json"),
+      uploadedAt: 50,
+    });
+    files.set("zielarka/docs/1700000000000-aaaaaa.json", { body: Buffer.from(JSON.stringify(older)), uploadedAt: 20 });
+    resetPublicCacheForTests();
+    await assert.rejects(() => readPublicEdits(), /uszkodzona/);
+    const damagedPlan = await diagnosePublicCutover();
+    assert.equal(damagedPlan.action, "stop");
+    assert.equal(files.has("zielarka/journal/public/current.json"), false);
+
+    files.clear();
+    resetPublicCacheForTests();
+    const odd = {
+      ...currentMain,
+      notatkaWlasna: "nie gubić",
+      entries: [{ ...publishedEntry, wlasnePole: "zostaje w pliku" }],
+    };
+    files.set("zielarka/docs/1700000003000-dddddd.json", { body: Buffer.from(JSON.stringify(odd)), uploadedAt: 8 });
+    const visibleOdd = await readPublicEdits();
+    assert.equal(visibleOdd.entries.some((entry) => entry.slug === "pokrzywa-polna"), true);
+    const oddPlan = await diagnosePublicCutover();
+    assert.equal(oddPlan.action, "stop");
+    assert.match(oddPlan.reason, /notatkaWlasna/);
+    assert.match(oddPlan.reason, /wlasnePole/);
+    assert.equal(files.has("zielarka/journal/public/current.json"), false);
+    assert.equal(files.get("zielarka/docs/1700000003000-dddddd.json")?.body.toString("utf8").includes("nie gubić"), true);
+    const refused = await applyPublicCutover(true);
+    assert.equal(refused.action, "stop");
+    assert.equal(files.has("zielarka/journal/public/current.json"), false);
+
+    files.clear();
+    resetPublicCacheForTests();
+    files.set("zielarka/docs/1700000004000-eeeeee.json", {
+      body: Buffer.from(JSON.stringify(currentMain)),
+      uploadedAt: 3,
+    });
+    files.set("zielarka/journal/public/00000004.json", {
+      body: Buffer.from(JSON.stringify({ revision: 4, url: "https://evil.example/x", sha: "ab".repeat(32) })),
+      uploadedAt: 9,
+    });
+    const mixed = await readPublicEdits();
+    assert.equal(mixed.copy["home.note"], "z-produkcji");
+    assert.notEqual(mixed.revision, 4);
+    const mixedPlan = await diagnosePublicCutover();
+    assert.equal(mixedPlan.action, "stop");
+    assert.equal(files.has("zielarka/journal/public/current.json"), false);
+
+    files.clear();
+    resetPublicCacheForTests();
+    const emptyRead = await readPublicEdits();
+    assert.equal(emptyRead.revision, 0);
+    assert.equal(emptyRead.entries.length, 0);
+    const emptyPlan = await diagnosePublicCutover();
+    assert.equal(emptyPlan.action, "stop");
+    assert.equal(files.has("zielarka/journal/public/current.json"), false);
+
+    files.set("zielarka/docs/1700000005000-ffffff.json", { body: Buffer.from(JSON.stringify(currentMain)), uploadedAt: 6 });
+    resetPublicCacheForTests();
+    failList = 403;
+    await assert.rejects(() => readPublicEdits(), /403|chwilowo niedostępny/);
+    failList = 429;
+    resetPublicCacheForTests();
+    await assert.rejects(() => readPublicEdits(), /429|chwilowo niedostępny/);
+    failList = 500;
+    resetPublicCacheForTests();
+    await assert.rejects(() => readPublicEdits(), /500|chwilowo niedostępny/);
+    failList = 0;
+    outage = true;
+    resetPublicCacheForTests();
+    await assert.rejects(() => readPublicEdits(), /503|chwilowo niedostępny/);
+    outage = false;
+    resetPublicCacheForTests();
+    assert.equal((await readPublicEdits()).copy["home.note"], "z-produkcji");
+    files.set("zielarka/journal/public/current.json", {
+      body: Buffer.from(JSON.stringify({ revision: 1, url: imageUrl, sha: "ab".repeat(32), committed: false })),
+      uploadedAt: 70,
+    });
+    resetPublicCacheForTests();
+    const beforeBadPointer = calls.length;
+    await assert.rejects(() => readPublicEdits(), /uszkodzona|chwilowo/);
+    assert.equal(calls.slice(beforeBadPointer).some((item) => item.startsWith("LIST")), false);
     writeFileSync("/tmp/zielarka-perf.json", JSON.stringify(timings));
   } finally {
     restoreEnv();

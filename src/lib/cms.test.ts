@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import test from "node:test";
 import { listAllBlobs, newestRevisionPath, parseBlobListPage, urlsIfComplete } from "./blob-pages.ts";
-import { assertRevision, attemptBlocked, canonicalEdits, chooseFreshRead, classifyLegacy, confirmFreshBody, createAttemptLimiter, draftImageUrls, expiredInboxUrls, freshReadDecision, freshReadDelayMs, FRESH_READ_LIMIT, healMayPublish, herbOutageAction, journalStep, judgeJournal, lockDecision, memWrite, migrationAllowed, migrationPlan, newestCommittedRevision, nextAttempt, publicFallback, publicJournalFailure, publicReadCost, readFailureAction, restoreAllowed, sameRevisionOrUnreadable, selectPublicRevision, setFreshReadDelayScaleForTests, STORE_OUTAGE, throwIfUncertain, toPublicDoc, trustPublicPointer, urlsToPrune, urlsToRetain, writeAfterReread, acceptPublicPointer, cutoverDecision } from "./cms-guard.ts";
+import { assertRevision, attemptBlocked, canonicalEdits, chooseFreshRead, classifyLegacy, confirmFreshBody, createAttemptLimiter, draftImageUrls, expiredInboxUrls, freshReadDecision, freshReadDelayMs, FRESH_READ_LIMIT, healMayPublish, herbOutageAction, journalStep, judgeJournal, legacyFieldLoss, lockDecision, memWrite, migrationAllowed, migrationPlan, newestCommittedRevision, nextAttempt, publicFallback, publicJournalFailure, publicReadCost, readFailureAction, restoreAllowed, sameRevisionOrUnreadable, selectPublicRevision, setFreshReadDelayScaleForTests, STORE_OUTAGE, throwIfUncertain, toPublicDoc, trustPublicPointer, unpointedPublicChoice, urlsToPrune, urlsToRetain, writeAfterReread, acceptPublicPointer, cutoverDecision } from "./cms-guard.ts";
 import { openJson, payloadSha, resealJson, sealJson, sealWithEditorPassword } from "./draft-seal.server.ts";
 import { normalizeEntry, plainText, slugify, uniqueSlug } from "./entries.ts";
 import { sitemapXml } from "./sitemap.ts";
@@ -634,6 +634,93 @@ test("dziennik 12 nie może wskazywać dokumentu 10 ani złej sumy", () => {
     }).action,
     "already",
   );
+  const mainOnly = cutoverDecision({
+    storeAnswered: true,
+    pointerStatus: 404,
+    pointer: null,
+    pointerDocMatches: false,
+    historyAnswered: true,
+    commitUnreadable: false,
+    commits: [],
+    journals: [],
+    main: {
+      answered: true,
+      damaged: false,
+      hasContent: true,
+      uploadedAt: 10,
+      publicSha: sha,
+      url: "https://cdn.example/docs/a.json",
+      unknown: [],
+      truncated: [],
+    },
+  });
+  assert.equal(mainOnly.action, "ready");
+  assert.equal(mainOnly.source, "main");
+  assert.equal(
+    cutoverDecision({
+      storeAnswered: true,
+      pointerStatus: 404,
+      pointer: null,
+      pointerDocMatches: false,
+      historyAnswered: true,
+      commitUnreadable: false,
+      commits: [],
+      journals: [],
+      main: {
+        answered: true,
+        damaged: false,
+        hasContent: true,
+        uploadedAt: 10,
+        publicSha: sha,
+        url: "https://cdn.example/docs/a.json",
+        unknown: ["notatkaWlasna"],
+        truncated: [],
+      },
+    }).action,
+    "stop",
+  );
+  assert.equal(
+    cutoverDecision({
+      storeAnswered: true,
+      pointerStatus: 404,
+      pointer: null,
+      pointerDocMatches: false,
+      historyAnswered: true,
+      commitUnreadable: false,
+      commits: [],
+      journals: [journal],
+      main: {
+        answered: true,
+        damaged: false,
+        hasContent: true,
+        uploadedAt: 10,
+        publicSha: sha,
+        url: "https://cdn.example/docs/a.json",
+        unknown: [],
+        truncated: [],
+      },
+    }).action,
+    "stop",
+  );
+  assert.equal(unpointedPublicChoice({ main: { hasContent: true, damaged: false, uploadedAt: 5 }, commit: null }), "main");
+  assert.equal(unpointedPublicChoice({ main: { hasContent: false, damaged: false, uploadedAt: 0 }, commit: null }), "empty");
+  assert.equal(
+    unpointedPublicChoice({
+      main: { hasContent: true, damaged: false, uploadedAt: 5 },
+      commit: { uploadedAt: 9, journalOk: true },
+    }),
+    "commit",
+  );
+  assert.equal(
+    unpointedPublicChoice({
+      main: { hasContent: true, damaged: false, uploadedAt: 12 },
+      commit: { uploadedAt: 9, journalOk: true },
+    }),
+    "main",
+  );
+  assert.equal(unpointedPublicChoice({ main: { hasContent: true, damaged: true, uploadedAt: 12 }, commit: null }), "damaged");
+  assert.equal(legacyFieldLoss({ copy: {}, images: {}, herbs: {}, entries: [], notatkaWlasna: "zostaw" }).unknown.join(","), "notatkaWlasna");
+  assert.equal(legacyFieldLoss({ entries: [{ name: "Mięta", slug: "mieta", lead: "x".repeat(601) }] }).truncated.join(","), "entries[0].lead");
 });
 
 test("świeży odczyt po PUT powtarza tylko 404 i nie publikuje bez znacznika", () => {

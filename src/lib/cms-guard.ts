@@ -2,12 +2,27 @@ export type StampBlob = { pathname: string; url: string; uploadedAt: number };
 export type AttemptRow = { count: number; until: number };
 export type KeptBlob = { pathname: string; url: string; uploadedAt: number; revision: number };
 
-export function toPublicDoc<T extends { entries: { status: string; image?: string }[]; images?: Record<string, string> }>(
+export function toPublicDoc<T extends { entries: { status: string; image?: string; slug?: string }[]; images?: Record<string, string> }>(
   doc: T,
 ): T {
+  const drafts = doc.entries.filter((entry) => entry.status !== "published");
+  const draftSlugs = new Set(drafts.map((entry) => entry.slug).filter((slug): slug is string => Boolean(slug)));
+  const publishedImages = new Set(
+    doc.entries
+      .filter((entry) => entry.status === "published" && typeof entry.image === "string")
+      .map((entry) => entry.image as string),
+  );
+  const draftImages = new Set(
+    drafts.map((entry) => entry.image).filter((image): image is string => typeof image === "string" && image.length > 0),
+  );
   const images = doc.images
     ? Object.fromEntries(
-        Object.entries(doc.images).filter(([, value]) => typeof value === "string" && !value.startsWith("seal:")),
+        Object.entries(doc.images).filter(([key, value]) => {
+          if (typeof value !== "string" || value.startsWith("seal:")) return false;
+          if (draftSlugs.has(key.replace(/^img\.herb\./, "")) && key.startsWith("img.herb.")) return false;
+          if (draftImages.has(value) && !publishedImages.has(value)) return false;
+          return true;
+        }),
       )
     : doc.images;
   return {
@@ -199,12 +214,144 @@ export type CutoverPlan = {
   revision: number;
   url: string;
   sha: string;
+  /** pointer = już jest current.json; journal = nowy dziennik; main = zielarka/docs albo content.json. */
+  source: "pointer" | "journal" | "main" | "none";
 };
+
+export type MainCutoverHead = {
+  answered: boolean;
+  damaged: boolean;
+  hasContent: boolean;
+  uploadedAt: number;
+  publicSha: string;
+  url: string;
+  unknown: string[];
+  truncated: string[];
+};
+
+const MAIN_TOP_KEYS = new Set(["copy", "images", "herbs", "entries", "revision", "theme", "styles", "sha"]);
+const MAIN_ENTRY_KEYS = new Set([
+  "slug",
+  "status",
+  "name",
+  "latin",
+  "lead",
+  "note",
+  "season",
+  "part",
+  "habitat",
+  "recognize",
+  "harvest",
+  "prepare",
+  "tradition",
+  "caution",
+  "seoTitle",
+  "seoDescription",
+  "alt",
+  "image",
+  "faqs",
+  "related",
+  "updatedAt",
+  "history",
+]);
+const MAIN_ENTRY_LIMITS: Record<string, number> = {
+  name: 80,
+  latin: 80,
+  lead: 600,
+  note: 240,
+  season: 80,
+  part: 80,
+  habitat: 160,
+  recognize: 2000,
+  harvest: 2000,
+  prepare: 2000,
+  tradition: 2000,
+  caution: 2000,
+  seoTitle: 70,
+  seoDescription: 160,
+  alt: 160,
+  slug: 60,
+  updatedAt: 40,
+};
+
+/**
+ * Produkcyjny main zapisuje {copy, images, herbs, entries} bez pola committed.
+ * To nie jest nowa transakcja. Funkcja tylko wylicza, co parser by uciął.
+ * Herbs zostają całe: main trzyma tam dowolny obiekt nadpisania rośliny.
+ */
+export function legacyFieldLoss(raw: unknown): { unknown: string[]; truncated: string[] } {
+  const unknown: string[] = [];
+  const truncated: string[] = [];
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { unknown: ["(dokument nie jest obiektem)"], truncated };
+  const record = raw as Record<string, unknown>;
+  for (const key of Object.keys(record)) {
+    if (!MAIN_TOP_KEYS.has(key)) unknown.push(key);
+  }
+  if (!Array.isArray(record.entries)) return { unknown, truncated };
+  record.entries.forEach((entry, index) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      unknown.push(`entries[${index}]`);
+      return;
+    }
+    const row = entry as Record<string, unknown>;
+    for (const key of Object.keys(row)) {
+      if (!MAIN_ENTRY_KEYS.has(key)) unknown.push(`entries[${index}].${key}`);
+      const limit = MAIN_ENTRY_LIMITS[key];
+      if (typeof row[key] === "string" && limit && (row[key] as string).length > limit) truncated.push(`entries[${index}].${key}`);
+    }
+    if (typeof row.image === "string" && !row.image.startsWith("data:") && row.image.length > 2000) {
+      truncated.push(`entries[${index}].image`);
+    }
+    if (Array.isArray(row.history)) {
+      row.history.forEach((item, historyIndex) => {
+        if (!item || typeof item !== "object") return;
+        const history = item as Record<string, unknown>;
+        for (const key of Object.keys(history)) {
+          if (!["at", "name", "lead", "status"].includes(key)) unknown.push(`entries[${index}].history[${historyIndex}].${key}`);
+        }
+        if (typeof history.at === "string" && history.at.length > 40) truncated.push(`entries[${index}].history[${historyIndex}].at`);
+        if (typeof history.name === "string" && history.name.length > 80) truncated.push(`entries[${index}].history[${historyIndex}].name`);
+        if (typeof history.lead === "string" && history.lead.length > 200) truncated.push(`entries[${index}].history[${historyIndex}].lead`);
+      });
+    }
+    if (Array.isArray(row.faqs)) {
+      row.faqs.forEach((item, faqIndex) => {
+        if (!item || typeof item !== "object") return;
+        const faq = item as Record<string, unknown>;
+        for (const key of Object.keys(faq)) {
+          if (key !== "q" && key !== "a") unknown.push(`entries[${index}].faqs[${faqIndex}].${key}`);
+        }
+        if (typeof faq.q === "string" && faq.q.length > 160) truncated.push(`entries[${index}].faqs[${faqIndex}].q`);
+        if (typeof faq.a === "string" && faq.a.length > 600) truncated.push(`entries[${index}].faqs[${faqIndex}].a`);
+      });
+    }
+  });
+  return { unknown, truncated };
+}
+
+/**
+ * Brak current.json. Stary dokument main i zatwierdzony dziennik to dwie różne ścieżki.
+ * Dziennik bez znacznika commit nie wchodzi do tej decyzji w ogóle.
+ */
+export function unpointedPublicChoice(input: {
+  main: { hasContent: boolean; damaged: boolean; uploadedAt: number } | null;
+  commit: { uploadedAt: number; journalOk: boolean } | null;
+}): "main" | "commit" | "empty" | "damaged" | "ambiguous" {
+  const main = input.main;
+  const commit = input.commit;
+  if (main?.damaged && (!commit || main.uploadedAt > commit.uploadedAt)) return "damaged";
+  if (main?.hasContent && !main.damaged && (!commit || !commit.journalOk)) return "main";
+  if (commit?.journalOk && (!main?.hasContent || main.damaged || commit.uploadedAt >= (main?.uploadedAt ?? 0))) return "commit";
+  if (main?.hasContent && !main.damaged) return "main";
+  if (!main?.hasContent && !commit) return "empty";
+  return "ambiguous";
+}
 
 /**
  * Jednorazowa decyzja przejścia na current.json. Nie zapisuje.
  * Brak odpowiedzi nie jest pustą bazą. Nowszy dziennik bez znacznika zatrzymuje operację.
- * Stary dziennik przechodzi tylko, gdy nie ma żadnego znacznika, a jego suma zgadza się z dokumentem.
+ * Dokument produkcyjnego main (zielarka/docs albo content.json) nie ma pola committed.
+ * Nie jest przez to nową transakcją. Ma osobną ścieżkę i nie jest pustką.
  */
 export function cutoverDecision(input: {
   storeAnswered: boolean;
@@ -213,10 +360,11 @@ export function cutoverDecision(input: {
   pointerDocMatches: boolean;
   historyAnswered: boolean;
   commitUnreadable: boolean;
-  commits: readonly { revision: number; publicSha: string }[] | null;
+  commits: readonly { revision: number; publicSha: string; uploadedAt?: number }[] | null;
   journals: readonly { revision: number; url: string; sha: string; docMatches: boolean; draft: boolean }[] | null;
+  main?: MainCutoverHead | null;
 }): CutoverPlan {
-  const stop = (reason: string): CutoverPlan => ({ action: "stop", reason, revision: 0, url: "", sha: "" });
+  const stop = (reason: string): CutoverPlan => ({ action: "stop", reason, revision: 0, url: "", sha: "", source: "none" });
   if (!input.storeAnswered) return stop("Magazyn nie odpowiedział. Nic nie zostało uznane za puste.");
   if (input.pointerStatus != null && input.pointerStatus !== 200 && input.pointerStatus !== 404) {
     return stop("Odczyt wskaźnika nie jest pewny. Migracja nie ruszyła.");
@@ -229,6 +377,7 @@ export function cutoverDecision(input: {
         revision: input.pointer.revision as number,
         url: input.pointer.url as string,
         sha: input.pointer.sha as string,
+        source: "pointer",
       };
     }
     return stop("Wskaźnik nie ma jednoznacznego zatwierdzenia. Migracja nie ruszyła.");
@@ -237,10 +386,17 @@ export function cutoverDecision(input: {
     return stop("Historii nie da się potwierdzić. Migracja nie ruszyła.");
   }
   if (input.commitUnreadable) return stop("Znacznik zatwierdzenia jest niepewny. Migracja nie ruszyła.");
+  const main = input.main ?? null;
   if (input.commits.length > 0) {
     const best = input.commits.reduce((left, right) => (left.revision > right.revision ? left : right));
     if (input.journals.some((journal) => journal.revision > best.revision)) {
       return stop("Jest nowszy dziennik bez zatwierdzenia. Wskaźnik nie został utworzony.");
+    }
+    if (main?.damaged && main.uploadedAt > (best.uploadedAt ?? 0)) {
+      return stop("Najnowszy stary dokument jest uszkodzony. Starszego nie podstawiam.");
+    }
+    if (main?.hasContent && !main.damaged && main.uploadedAt > (best.uploadedAt ?? 0)) {
+      return stop("Nowszy jest dokument ze starego CMS. Nie cofam go do starszego zatwierdzenia.");
     }
     const journal = input.journals.find(
       (item) => item.revision === best.revision && item.sha === best.publicSha && item.docMatches && !item.draft,
@@ -252,6 +408,28 @@ export function cutoverDecision(input: {
       revision: journal.revision,
       url: journal.url,
       sha: journal.sha,
+      source: "journal",
+    };
+  }
+  if (main?.hasContent) {
+    if (main.damaged) return stop("Najnowszy stary dokument jest uszkodzony. Starszego nie podstawiam.");
+    if (input.journals.length > 0) {
+      return stop("Są stare dokumenty i dziennik bez znacznika. Nie wybieram po cichu starszej wersji.");
+    }
+    const loss = [...main.unknown, ...main.truncated];
+    if (loss.length > 0) {
+      return stop(`Stary dokument ma pola, których nie wolno uciąć: ${loss.join(", ")}. Wskaźnik nie został utworzony.`);
+    }
+    if (!JOURNAL_SHA.test(main.publicSha) || !main.url) {
+      return stop("Stary dokument nie ma pewnej sumy. Wskaźnik nie został utworzony.");
+    }
+    return {
+      action: "ready",
+      reason: "Stary dokument produkcyjny jest czytelny. Wskaźnik powstanie dopiero na polecenie.",
+      revision: 1,
+      url: main.url,
+      sha: main.publicSha,
+      source: "main",
     };
   }
   if (input.journals.length === 0) return stop("Brak zatwierdzonego dziennika. Wskaźnik nie został utworzony.");
@@ -265,6 +443,7 @@ export function cutoverDecision(input: {
     revision: newest.revision,
     url: newest.url,
     sha: newest.sha,
+    source: "journal",
   };
 }
 

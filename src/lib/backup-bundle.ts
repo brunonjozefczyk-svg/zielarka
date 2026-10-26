@@ -4,7 +4,7 @@
  * Automatyczna kopia poza Vercel Blob nie jest tu włączona.
  */
 import { createHash } from "node:crypto";
-import { canonicalEdits, restoreAllowed, urlsToRetain, type KeptBlob } from "./cms-guard";
+import { canonicalEdits, FRESH_READ_LIMIT, restoreAllowed, UNCERTAIN_RESTORE, urlsToRetain, waitFreshRead, type KeptBlob } from "./cms-guard";
 import { payloadSha } from "./draft-seal.server";
 import { RAW_SLICE, SERVER_PAYLOAD_LIMIT } from "./backup-wire";
 
@@ -41,7 +41,7 @@ export type BackupPayload = {
 
 export type RecoverResult =
   | { ok: true; revision: number; snapshotted: boolean; message: string }
-  | { ok: false; message: string };
+  | { ok: false; message: string; uncertain?: boolean };
 
 const MAX_IMAGE = 2_500_000;
 
@@ -254,8 +254,17 @@ export async function recoverBackup(input: {
   let current: BackupDoc | null = null;
   try {
     current = await input.readCurrent();
-  } catch {
-    current = null;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "";
+    if (message === "Aktywna treść jest uszkodzona.") {
+      current = null;
+    } else {
+      return {
+        ok: false,
+        uncertain: true,
+        message: "Nie da się odczytać aktualnej treści. Odtwarzanie zostało zatrzymane. Nic nie zostało podmienione.",
+      };
+    }
   }
   if (restoreGate(current, input.expectedRevision) === "conflict") {
     return { ok: false, message: "Ktoś zapisał w międzyczasie. Odśwież stronę. Nic nie zostało podmienione." };
@@ -296,15 +305,40 @@ export async function recoverBackup(input: {
       message: "Odzyskanie przerwało się przed publikacją. Poprzednia wersja została, a kopia źródłowa nie została skasowana.",
     };
   }
-  try {
-    const back = await input.readBack();
-    if (textCanon(back) !== textCanon(next)) throw new Error("odczyt");
-    await assertRestored(back, files, urls, input.readImage);
-  } catch {
-    return {
-      ok: false,
-      message: "Zapis odzyskania nie dał się ponownie odczytać. Kopia źródłowa nie została skasowana.",
-    };
+  let confirmed = false;
+  let sawMismatch = false;
+  for (let attempt = 0; attempt < FRESH_READ_LIMIT; attempt += 1) {
+    if (attempt > 0) await waitFreshRead(attempt);
+    try {
+      const back = await input.readBack();
+      if (textCanon(back) !== textCanon(next)) {
+        sawMismatch = true;
+        break;
+      }
+      await assertRestored(back, files, urls, input.readImage);
+      confirmed = true;
+      break;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "";
+      if (message === "zdjęcie" || message === "adres" || message === "odczyt") {
+        sawMismatch = true;
+        break;
+      }
+      const retry = /Odczyt treści nie powiódł się \(404\)|chwilowo niedostępny/.test(message);
+      if (!retry) {
+        sawMismatch = /nie zgadza|uszkodzon|Suma/.test(message);
+        break;
+      }
+    }
+  }
+  if (!confirmed) {
+    if (sawMismatch) {
+      return {
+        ok: false,
+        message: "Zapis odzyskania nie zgadza się z kopią. Kopia źródłowa nie została skasowana.",
+      };
+    }
+    return { ok: false, uncertain: true, message: UNCERTAIN_RESTORE };
   }
   const message = snapshotted
     ? "Przywrócono kopię i sprawdzono, że da się ją odczytać. Aktualny stan został wcześniej zapisany."

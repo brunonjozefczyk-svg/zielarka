@@ -122,7 +122,7 @@ test("uszkodzona baza nie blokuje odtworzenia, a zła kopia nic nie zapisuje", a
     expectedRevision: 99,
     raw: payload,
     readCurrent: async () => {
-      throw new Error("dokument uszkodzony");
+      throw new Error("Aktywna treść jest uszkodzona.");
     },
     revisionHint: async () => 7,
     snapshot: async () => {
@@ -194,9 +194,15 @@ test("utrata testowego magazynu odtwarza tekst i zdjęcia z pliku, nie z Vercel"
       phrase: "PRZYWRÓĆ",
       expectedRevision: 0,
       raw: opened,
-      readCurrent: async () => {
-        throw new Error("magazyn zniknął");
-      },
+      readCurrent: async () => ({
+        revision: 0,
+        copy: {},
+        images: {},
+        herbs: {},
+        entries: [],
+        theme: null,
+        styles: {},
+      }),
       revisionHint: async () => 0,
       snapshot: async () => {
         throw new Error("nie ma czego zabezpieczyć");

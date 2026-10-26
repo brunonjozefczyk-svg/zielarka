@@ -19,6 +19,12 @@ import {
   writeAfterReread,
   lockDecision,
   publicFallback,
+  FRESH_READ_LIMIT,
+  UNCERTAIN_SAVE,
+  confirmFreshBody,
+  freshReadDecision,
+  healMayPublish,
+  waitFreshRead,
   type AttemptRow,
   type StampBlob,
 } from "./cms-guard";
@@ -71,6 +77,7 @@ const LOCKS = "zielarka/locks/";
 const AUTH = "zielarka/auth/";
 const JOURNAL_PUBLIC = "zielarka/journal/public/";
 const JOURNAL_PRIVATE = "zielarka/journal/private/";
+const JOURNAL_COMMIT = "zielarka/journal/commit/";
 const PUBLIC_CURRENT = "zielarka/journal/public/current.json";
 const BACKUPS = "zielarka/backups/";
 const INBOX = "zielarka/restore-inbox/";
@@ -292,14 +299,98 @@ function padRevision(revision: number) {
   return String(revision).padStart(8, "0");
 }
 
+async function confirmPointer(
+  url: string,
+  expected: { revision: number; url: string; sha: string },
+  sealed: boolean,
+) {
+  const raw = await fetchFreshJson(url);
+  const opened = sealed ? openJson(raw) : raw;
+  if (!opened || typeof opened !== "object") throw new Error("Kopia jest uszkodzona.");
+  const row = opened as { revision?: unknown; url?: unknown; sha?: unknown };
+  if (row.revision !== expected.revision || row.url !== expected.url || row.sha !== expected.sha) {
+    throw new Error("Kopia jest uszkodzona.");
+  }
+}
+
+async function writePublicJournal(revision: number, pointer: { revision: number; url: string; sha: string }) {
+  const pathname = `${JOURNAL_PUBLIC}${padRevision(revision)}.json`;
+  const body = JSON.stringify(pointer);
+  try {
+    const saved = await blobPut(pathname, body, "application/json");
+    await confirmPointer(saved.url, pointer, false);
+    return "COMMITTED" as const;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "";
+    if (!/Zapis nie powiódł się/.test(message)) return "UNCERTAIN" as const;
+    let head: BlobMeta | null;
+    try {
+      head = await blobHead(pathname);
+    } catch {
+      return "UNCERTAIN" as const;
+    }
+    if (!head || !readUrl(head)) return "FAILED" as const;
+    try {
+      await confirmPointer(readUrl(head), pointer, false);
+      return "COMMITTED" as const;
+    } catch {
+      return "UNCERTAIN" as const;
+    }
+  }
+}
+
 async function fetchJson(url: string) {
   const res = await fetch(url, { cache: "no-store" });
   if (!res.ok) throw new Error(`Odczyt treści nie powiódł się (${res.status}).`);
   return (await res.json()) as unknown;
 }
 
+/**
+ * Odczyt pliku, który właśnie zapisaliśmy i znamy jego adres.
+ * Zwykły odczyt strony zostaje przy fetchJson — tu nie ma czekania, gdy pierwszy GET jest 200.
+ * 404 powtarzamy krótko. 500, 503 i sieć przerywają od razu.
+ */
+async function fetchFreshJson(url: string) {
+  let lastStatus = 0;
+  for (let attempt = 0; attempt < FRESH_READ_LIMIT; attempt += 1) {
+    if (attempt > 0) await waitFreshRead(attempt);
+    let res: Response;
+    try {
+      res = await fetch(url, { cache: "no-store" });
+    } catch {
+      throw new Error(STORE_OUTAGE);
+    }
+    lastStatus = res.status;
+    const decision = freshReadDecision(res.status, attempt);
+    if (decision === "ok") return (await res.json()) as unknown;
+    if (decision === "stop") break;
+  }
+  if (lastStatus === 404) throw new Error("Odczyt treści nie powiódł się (404).");
+  if (lastStatus >= 500 || lastStatus === 0) throw new Error(STORE_OUTAGE);
+  throw new Error(`Odczyt treści nie powiódł się (${lastStatus}).`);
+}
+
 async function fetchDoc(url: string) {
   return unwrapDoc(await fetchJson(url));
+}
+
+async function fetchFreshDoc(url: string, expectedRevision: number, expectedSha: string) {
+  let doc: SiteEdits;
+  try {
+    doc = unwrapDoc(await fetchFreshJson(url));
+  } catch (error) {
+    if (error instanceof Error && error.message === "Kopia jest uszkodzona.") throw error;
+    throw error;
+  }
+  const verdict = confirmFreshBody({
+    readable: true,
+    revision: doc.revision,
+    expectedRevision,
+    sha: payloadSha(canonicalEdits(doc)),
+    expectedSha,
+  });
+  if (verdict !== "ok") throw new Error("Kopia jest uszkodzona.");
+  return doc;
 }
 
 function highestRevision(blobs: BlobMeta[]) {
@@ -623,22 +714,41 @@ async function writeEdits(doc: SiteEdits, afterPrivate?: (written: SiteEdits) =>
       throw new Error("Ktoś zapisał w międzyczasie. Odśwież stronę.");
     }
     privateUrl = (await blobPut(privatePath, sealJson(privateStamp.text), "application/json")).url;
-    const check = await fetchDoc(privateUrl);
-    if (check.revision !== next.revision) throw new Error("Kopia prywatna nie zgadza się.");
+    const check = await fetchFreshDoc(privateUrl, next.revision, privateStamp.sha);
     if (afterPrivate) await afterPrivate(check);
     publicUrl = (await blobPut(publicPath, publicStamp.text, "application/json")).url;
-    const publicCheck = await fetchDoc(publicUrl);
-    if (publicCheck.revision !== next.revision) throw new Error("Kopia publiczna nie zgadza się.");
-    await blobPut(
+    await fetchFreshDoc(publicUrl, next.revision, publicStamp.sha);
+    const privatePointer = { revision: next.revision, url: privateUrl, sha: privateStamp.sha };
+    const privateJournal = await blobPut(
       `${JOURNAL_PRIVATE}${padRevision(next.revision)}.json`,
-      sealJson(JSON.stringify({ revision: next.revision, url: privateUrl, sha: privateStamp.sha })),
+      sealJson(JSON.stringify(privatePointer)),
       "application/json",
     );
-    await blobPut(
-      `${JOURNAL_PUBLIC}${padRevision(next.revision)}.json`,
-      JSON.stringify({ revision: next.revision, url: publicUrl, sha: publicStamp.sha }),
-      "application/json",
-    );
+    await confirmPointer(privateJournal.url, privatePointer, true);
+    const publicPointer = { revision: next.revision, url: publicUrl, sha: publicStamp.sha };
+    const publishedState = await writePublicJournal(next.revision, publicPointer);
+    if (publishedState === "FAILED") {
+      try {
+        await blobDelete([privateJournal.url]);
+      } catch {
+        throw new Error(UNCERTAIN_SAVE);
+      }
+      throw new Error("Zapis nie powiódł się (500). Publikacja nie została wykonana.");
+    }
+    if (publishedState !== "COMMITTED") throw new Error(UNCERTAIN_SAVE);
+    try {
+      const commit = await blobPut(
+        `${JOURNAL_COMMIT}${padRevision(next.revision)}.json`,
+        JSON.stringify({ revision: next.revision, sha: privateStamp.sha, publicSha: publicStamp.sha }),
+        "application/json",
+      );
+      const raw = (await fetchFreshJson(commit.url)) as { revision?: unknown; sha?: unknown; publicSha?: unknown };
+      if (raw.revision !== next.revision || raw.sha !== privateStamp.sha || raw.publicSha !== publicStamp.sha) {
+        throw new Error("Kopia jest uszkodzona.");
+      }
+    } catch (error) {
+      console.error(error instanceof Error ? error.message : "Znacznik zatwierdzenia nie został potwierdzony.");
+    }
     await writePublicPointer(next.revision, publicUrl, publicStamp.sha);
     publicCache = { at: Date.now(), data: published };
   } catch (error) {
@@ -828,21 +938,54 @@ export async function restorePrevious(expectedRevision: number) {
   return { revision: await writeEdits(restored) };
 }
 
+async function latestCommit(): Promise<{ revision: number; sha: string; publicSha: string } | null> {
+  const latest = highestRevision(await blobList(JOURNAL_COMMIT));
+  if (!latest || !readUrl(latest)) return null;
+  const raw = (await fetchJson(readUrl(latest))) as { revision?: unknown; sha?: unknown; publicSha?: unknown };
+  if (typeof raw.revision !== "number" || typeof raw.sha !== "string" || typeof raw.publicSha !== "string") return null;
+  if (revisionFromPath(String(latest.pathname)) !== raw.revision) return null;
+  return { revision: raw.revision, sha: raw.sha, publicSha: raw.publicSha };
+}
+
 async function healPublic() {
-  const priv = await readPointer(JOURNAL_PRIVATE);
-  const pub = await readPointer(JOURNAL_PUBLIC);
-  if (!priv || (pub && pub.revision >= priv.revision)) return;
-  const doc = await fetchDoc(priv.url);
-  if (doc.revision !== priv.revision || payloadSha(canonicalEdits(doc)) !== priv.sha) return;
+  let commit: { revision: number; sha: string; publicSha: string } | null = null;
+  try {
+    commit = await latestCommit();
+  } catch {
+    return;
+  }
+  let publicRevision: number | null = null;
+  try {
+    publicRevision = (await readPointer(JOURNAL_PUBLIC))?.revision ?? null;
+  } catch {
+    return;
+  }
+  if (!healMayPublish({ commitRevision: commit?.revision ?? null, publicRevision })) return;
+  if (!commit) return;
+  let priv: { revision: number; url: string; sha: string } | null = null;
+  try {
+    priv = await readPointer(JOURNAL_PRIVATE);
+  } catch {
+    return;
+  }
+  if (!priv || priv.revision !== commit.revision || priv.sha !== commit.sha) return;
+  let doc: SiteEdits;
+  try {
+    doc = await fetchFreshDoc(priv.url, priv.revision, priv.sha);
+  } catch {
+    return;
+  }
   const published = toPublicDoc(parseDoc(doc));
   const stamp = stamped(published);
+  if (stamp.sha !== commit.publicSha) return;
   const saved = await blobPut(`${PUBLIC_DOCS}heal-${Date.now()}.json`, stamp.text, "application/json");
+  await fetchFreshDoc(saved.url, commit.revision, commit.publicSha);
   await blobPut(
-    `${JOURNAL_PUBLIC}${padRevision(doc.revision)}.json`,
-    JSON.stringify({ revision: doc.revision, url: saved.url, sha: stamp.sha }),
+    `${JOURNAL_PUBLIC}${padRevision(commit.revision)}.json`,
+    JSON.stringify({ revision: commit.revision, url: saved.url, sha: stamp.sha }),
     "application/json",
   );
-  await writePublicPointer(doc.revision, saved.url, stamp.sha);
+  await writePublicPointer(commit.revision, saved.url, stamp.sha);
   publicCache = { at: Date.now(), data: published };
 }
 
@@ -1011,6 +1154,10 @@ async function readSealed(url: string) {
   return openJson(await fetchJson(url));
 }
 
+async function readFreshSealed(url: string) {
+  return openJson(await fetchFreshJson(url));
+}
+
 async function findPart(sha256: string, slice: number, kid = "") {
   for (const pathname of partCandidates(sha256, slice, kid)) {
     const head = await blobHead(pathname);
@@ -1042,7 +1189,7 @@ async function storeSlice(sha256: string, slice: number, slices: number, bytes: 
     }
   }
   const saved = await blobPut(pathname, sealed, "application/json");
-  const opened = (await readSealed(saved.url)) as { sha256?: string; slice?: number; base64?: string };
+  const opened = (await readFreshSealed(saved.url)) as { sha256?: string; slice?: number; base64?: string };
   const got = Buffer.from(opened.base64 || "", "base64");
   if (opened.sha256 !== sha256 || opened.slice !== slice || !got.equals(bytes)) {
     throw new Error("Część kopii nie przeszła sprawdzenia. Kopia nie została uznana za dobrą.");
@@ -1179,13 +1326,7 @@ async function runRecover(raw: unknown, expectedRevision: number, phrase: string
     phrase,
     expectedRevision,
     raw,
-    readCurrent: async () => {
-      try {
-        return (await readForWrite()) as BackupDoc;
-      } catch {
-        return null;
-      }
-    },
+    readCurrent: async () => (await readForWrite()) as BackupDoc,
     revisionHint,
     snapshot: async () => {
       await createVerifiedBackup("manual", protectPath ? [protectPath] : []);
@@ -1236,7 +1377,7 @@ export async function createVerifiedBackup(kind: "manual" | "daily" | "monthly",
         ? `${BACKUPS}monthly/${at.slice(0, 7)}.json`
         : `${BACKUPS}manual/${Date.now()}.json`;
   const saved = await blobPut(name, sealed, "application/json");
-  const opened = (await readSealed(saved.url)) as BackupManifest;
+  const opened = (await readFreshSealed(saved.url)) as BackupManifest;
   if (!opened?.docSha || opened.docSha !== payload.docSha || opened.format !== 3 || opened.sealKid !== kid) {
     throw new Error("Kopia nie przeszła sprawdzenia. Nic nie zostało podmienione.");
   }
@@ -1340,7 +1481,7 @@ export async function beginRestoreUpload(sealedManifest: string) {
   }
   const session = randomBytes(16).toString("hex");
   const saved = await blobPut(`${INBOX}${session}/manifest.json`, sealJson(JSON.stringify(manifest)), "application/json");
-  const opened = (await readSealed(saved.url)) as BackupManifest;
+  const opened = (await readFreshSealed(saved.url)) as BackupManifest;
   if (opened.docSha !== manifest.docSha || opened.files.length !== manifest.files.length) {
     throw new Error("Manifest kopii nie dał się odczytać. Nic nie zostało podmienione.");
   }
@@ -1363,7 +1504,7 @@ export async function saveRestorePart(session: string, sealed: string) {
   }
   const pathname = `${INBOX}${session}/${opened.sha256}/${opened.slice}.json`;
   const saved = await blobPut(pathname, sealJson(JSON.stringify(opened)), "application/json");
-  const check = (await readSealed(saved.url)) as { sha256?: string; slice?: number };
+  const check = (await readFreshSealed(saved.url)) as { sha256?: string; slice?: number };
   if (check.sha256 !== opened.sha256 || check.slice !== opened.slice) {
     throw new Error("Część kopii nie dała się odczytać. Nic nie zostało podmienione.");
   }

@@ -194,6 +194,10 @@ test("świeży Blob: 404, zła suma, przerwana publikacja i odtworzenie", async 
     privateMisses = 1;
     const noted = await saveCopy("home.note", "mieta", 0);
     assert.equal(noted, 1);
+    const approved = JSON.parse(files.get("zielarka/journal/public/current.json")?.body.toString("utf8") || "null") as {
+      committed?: boolean;
+    };
+    assert.equal(approved.committed, true);
     const privateGets = calls.filter((item) => item.startsWith("GET zielarka/private/") || item.startsWith("GET404 zielarka/private/"));
     assert.ok(privateGets.some((item) => item.startsWith("GET404 ")) && privateGets.some((item) => item.startsWith("GET ")), "PUT 200, potem GET 404 i GET 200");
     resetPublicCacheForTests();
@@ -210,6 +214,32 @@ test("świeży Blob: 404, zła suma, przerwana publikacja i odtworzenie", async 
     );
     const added = calls.filter((item) => item.startsWith("GET ")).length - coldGets;
     assert.equal(added, 2, "zwykły odczyt nie ponawia");
+    const pointerPath = "zielarka/journal/public/current.json";
+    const keptPointer = files.get(pointerPath);
+    assert.ok(keptPointer);
+    const denied = JSON.parse(keptPointer.body.toString("utf8")) as { committed?: boolean };
+    denied.committed = false;
+    files.set(pointerPath, { body: Buffer.from(JSON.stringify(denied)), uploadedAt: keptPointer.uploadedAt });
+    resetPublicCacheForTests();
+    let beforeGate = calls.length;
+    await assert.rejects(() => readPublicEdits(), /uszkodzona|chwilowo/);
+    assert.equal(calls.slice(beforeGate).some((item) => item.startsWith("LIST")), false, "committed false nie listuje");
+    delete denied.committed;
+    files.set(pointerPath, { body: Buffer.from(JSON.stringify(denied)), uploadedAt: keptPointer.uploadedAt });
+    resetPublicCacheForTests();
+    beforeGate = calls.length;
+    await assert.rejects(() => readPublicEdits(), /uszkodzona|chwilowo/);
+    assert.equal(calls.slice(beforeGate).some((item) => item.startsWith("LIST")), false, "brak committed nie listuje");
+    files.set(pointerPath, keptPointer);
+    files.delete(pointerPath);
+    resetPublicCacheForTests();
+    beforeGate = calls.length;
+    const withoutPointer = await readPublicEdits();
+    assert.equal(withoutPointer.revision, 0);
+    assert.equal(calls.slice(beforeGate).some((item) => item.startsWith("LIST")), false, "brak wskaźnika nie listuje dziennika");
+    files.set(pointerPath, keptPointer);
+    resetPublicCacheForTests();
+    assert.equal((await readPublicEdits()).copy["home.note"], "mieta");
     files.set("zielarka/journal/public/00000099.json", {
       body: Buffer.from(JSON.stringify({ revision: 99, url: "https://evil.example/doc", sha: "ab".repeat(32) })),
       uploadedAt: 99_999,
@@ -248,6 +278,12 @@ test("świeży Blob: 404, zła suma, przerwana publikacja i odtworzenie", async 
     assert.equal(flipServes, 1, "zła suma nie jest ponawiana");
     resetPublicCacheForTests();
     assert.equal((await readEditorDoc()).copy["home.note"], "mieta");
+
+    fault = { method: "PUT", includes: "zielarka/journal/commit/", status: 500 };
+    await assert.rejects(() => saveCopy("home.note", "bez-znacznika", 1), /Publikacja nie została wykonana/);
+    resetPublicCacheForTests();
+    assert.equal((await readPublicEdits()).copy["home.note"], "mieta");
+    assert.equal([...files.keys()].some((path) => path.endsWith("journal/commit/00000002.json") || path.endsWith("journal/public/00000002.json")), false);
 
     fault = { method: "PUT", includes: "zielarka/private/", status: 500 };
     await assert.rejects(() => saveCopy("home.note", "prywatny-dokument", 1), /nie powiódł się \(500\)/);

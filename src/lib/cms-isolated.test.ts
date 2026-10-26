@@ -23,6 +23,8 @@ import {
   saveEntry,
   saveRestorePart,
   saveTheme,
+  diagnosePublicCutover,
+  applyPublicCutover,
 } from "./site-store.server.ts";
 
 const PNG = Buffer.from(
@@ -391,9 +393,42 @@ test("izolowany CMS: edytor, kopia, utrata magazynu i koszt listy", async () => 
       body: Buffer.from(JSON.stringify({ revision: 2, url: legacyUrl, sha: legacySha })),
       uploadedAt: 2,
     });
+    const beforeLegacy = calls.length;
+    const hiddenLegacy = await readPublicEdits();
+    assert.equal(hiddenLegacy.revision, 0);
+    assert.equal(calls.slice(beforeLegacy).some((item) => item.startsWith("LIST ")), false);
+    const looked = await diagnosePublicCutover();
+    assert.equal(looked.action, "ready");
+    assert.equal(looked.revision, 2);
+    assert.equal(files.has("zielarka/journal/public/current.json"), false);
+    const paused = await applyPublicCutover(false);
+    assert.equal(paused.action, "ready");
+    assert.equal(files.has("zielarka/journal/public/current.json"), false);
+    const promoted = await applyPublicCutover(true);
+    assert.equal(promoted.action, "already");
+    resetPublicCacheForTests();
     const legacyRead = await readPublicEdits();
     assert.equal(legacyRead.copy["home.note"], "stary-dziennik");
     assert.equal(legacyRead.revision, 2);
+    const promotedBody = JSON.parse(files.get("zielarka/journal/public/current.json")?.body.toString("utf8") || "null") as {
+      committed?: boolean;
+    };
+    assert.equal(promotedBody.committed, true);
+    files.set("zielarka/journal/public/00000009.json", {
+      body: Buffer.from(JSON.stringify({ revision: 9, url: legacyUrl, sha: "cd".repeat(32) })),
+      uploadedAt: 9,
+    });
+    files.delete("zielarka/journal/public/current.json");
+    files.set("zielarka/journal/commit/00000002.json", {
+      body: Buffer.from(JSON.stringify({ revision: 2, sha: legacySha, publicSha: legacySha })),
+      uploadedAt: 3,
+    });
+    resetPublicCacheForTests();
+    const unsafe = await diagnosePublicCutover();
+    assert.equal(unsafe.action, "stop");
+    assert.equal(files.has("zielarka/journal/public/current.json"), false);
+    const stillHidden = await readPublicEdits();
+    assert.notEqual(stillHidden.revision, 9);
     writeFileSync("/tmp/zielarka-perf.json", JSON.stringify(timings));
   } finally {
     restoreEnv();

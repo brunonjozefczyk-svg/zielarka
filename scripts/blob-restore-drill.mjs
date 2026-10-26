@@ -1,14 +1,20 @@
 #!/usr/bin/env node
 /**
- * Pełny test odzyskania CMS na OSOBNYM magazynie Vercel Blob.
+ * Próba odzyskania na OSOBNYM magazynie Vercel Blob.
  *
- * PASSED  — test naprawdę się wykonał (kod 0).
- * FAILED  — test się nie udał albo był wymagany i nie miał konfiguracji (kod 1).
+ * To nie jest pełny proces CMS. Skrypt woła adapter z cms-restore-drill.ts
+ * (funkcje kopii), a nie saveEntry, createVerifiedBackup ani finishRestoreUpload
+ * z site-store.server.ts. Te funkcje sprawdza test w pamięci:
+ * src/lib/cms-isolated.test.ts. Zielony wynik tego pliku nie oznacza,
+ * że produkcyjny CMS został odtworzony na prawdziwym Blob.
+ *
+ * PASSED  — adapter naprawdę się wykonał na osobnym magazynie (kod 0).
+ * FAILED  — próba się nie udała albo była wymagana i nie miała konfiguracji (kod 1).
  * SKIPPED — nie uruchomiono (kod 2). To nie jest potwierdzenie poprawności.
  *
  * Bez zmiennych skrypt nic nie wysyła.
  *
- * Prawdziwy bieg, dopiero na drugim, pustym magazynie (nie token produkcji):
+ * Prawdziwy bieg adaptera, dopiero na drugim, pustym magazynie (nie token produkcji):
  *   1. Utwórz w Vercel osobny Blob store. Nie używaj magazynu zielarka.pl.
  *   2. Skopiuj jego token. Ma postać vercel_blob_rw_<id>_<sekret>.
  *   3. Wygeneruj klucz inny niż CMS_SEAL_KEY:
@@ -36,7 +42,7 @@ if (!opted) {
   const status = requireRun ? "FAILED" : "SKIPPED";
   console.log(
     requireRun
-      ? "Pełny test odzyskania na Vercel Blob był wymagany, ale brak osobnego magazynu. Nic nie zostało zapisane."
+      ? "Test adaptera odzyskania na Vercel Blob był wymagany, ale brak osobnego magazynu. Nic nie zostało zapisane."
       : "Próba odzyskania na Vercel Blob nie została uruchomiona. Brak osobnego magazynu testowego. To nie jest potwierdzenie poprawności. Produkcja nie była ruszana.",
   );
   console.log(status);

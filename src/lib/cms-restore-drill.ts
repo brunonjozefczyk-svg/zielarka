@@ -1,6 +1,7 @@
 /**
- * Próba pełnego odzyskania CMS na interfejsie magazynu.
- * Nie zna ścieżek produkcyjnych zielarka/ i nie wysyła nic poza podany magazyn.
+ * Próba odzyskania na interfejsie magazynu (funkcje z backup-bundle).
+ * To nie jest site-store.server.ts. Nie zna ścieżek produkcyjnych zielarka/
+ * i nie wysyła nic poza podany magazyn.
  */
 import {
   buildPayload,
@@ -119,7 +120,7 @@ export function classifyDrillConfig(env: Record<string, string | undefined>): Dr
   if (!opted || !token) {
     return skip(
       requireRun
-        ? "Pełny test odzyskania na Vercel Blob był wymagany, ale brak osobnego magazynu. Nic nie zostało zapisane."
+        ? "Test adaptera odzyskania na Vercel Blob był wymagany, ale brak osobnego magazynu. Nic nie zostało zapisane."
         : "Próba odzyskania na Vercel Blob nie została uruchomiona. Brak osobnego magazynu testowego. To nie jest potwierdzenie poprawności. Produkcja nie była ruszana.",
     );
   }

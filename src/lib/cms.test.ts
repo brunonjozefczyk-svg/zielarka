@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import test from "node:test";
 import { listAllBlobs, newestRevisionPath, parseBlobListPage, urlsIfComplete } from "./blob-pages.ts";
-import { assertRevision, attemptBlocked, canonicalEdits, chooseFreshRead, classifyLegacy, createAttemptLimiter, draftImageUrls, expiredInboxUrls, herbOutageAction, journalStep, judgeJournal, lockDecision, memWrite, migrationAllowed, migrationPlan, newestCommittedRevision, nextAttempt, publicFallback, publicJournalFailure, publicReadCost, readFailureAction, restoreAllowed, sameRevisionOrUnreadable, selectPublicRevision, STORE_OUTAGE, throwIfUncertain, toPublicDoc, trustPublicPointer, urlsToPrune, urlsToRetain, writeAfterReread } from "./cms-guard.ts";
+import { assertRevision, attemptBlocked, canonicalEdits, chooseFreshRead, classifyLegacy, confirmFreshBody, createAttemptLimiter, draftImageUrls, expiredInboxUrls, freshReadDecision, freshReadDelayMs, FRESH_READ_LIMIT, healMayPublish, herbOutageAction, journalStep, judgeJournal, lockDecision, memWrite, migrationAllowed, migrationPlan, newestCommittedRevision, nextAttempt, publicFallback, publicJournalFailure, publicReadCost, readFailureAction, restoreAllowed, sameRevisionOrUnreadable, selectPublicRevision, setFreshReadDelayScaleForTests, STORE_OUTAGE, throwIfUncertain, toPublicDoc, trustPublicPointer, urlsToPrune, urlsToRetain, writeAfterReread } from "./cms-guard.ts";
 import { openJson, payloadSha, resealJson, sealJson, sealWithEditorPassword } from "./draft-seal.server.ts";
 import { normalizeEntry, plainText, slugify, uniqueSlug } from "./entries.ts";
 import { sitemapXml } from "./sitemap.ts";
@@ -576,4 +576,37 @@ test("dziennik 12 nie może wskazywać dokumentu 10 ani złej sumy", () => {
   assert.deepEqual(publicReadCost(10_000), { listRequests: 10, documentRequests: 2 });
   assert.deepEqual(publicReadCost(1001), { listRequests: 2, documentRequests: 2 });
   assert.deepEqual(publicReadCost(0), { listRequests: 0, documentRequests: 0 });
+});
+
+test("świeży odczyt po PUT powtarza tylko 404 i nie publikuje bez znacznika", () => {
+  assert.equal(freshReadDecision(200, 0), "ok");
+  assert.equal(freshReadDecision(404, 0), "retry");
+  assert.equal(freshReadDecision(404, FRESH_READ_LIMIT - 2), "retry");
+  assert.equal(freshReadDecision(404, FRESH_READ_LIMIT - 1), "stop");
+  assert.equal(freshReadDecision(500, 0), "stop");
+  assert.equal(freshReadDecision(503, 0), "stop");
+  assert.equal(freshReadDecision(0, 0), "stop");
+  assert.equal(freshReadDelayMs(0), 0);
+  setFreshReadDelayScaleForTests(0);
+  assert.equal(freshReadDelayMs(3), 0);
+  setFreshReadDelayScaleForTests(1);
+  assert.equal(freshReadDelayMs(1), 400);
+  assert.equal(freshReadDelayMs(5), 2000);
+  const sha = "ab".repeat(32);
+  assert.equal(
+    confirmFreshBody({ readable: true, revision: 4, expectedRevision: 4, sha, expectedSha: sha }),
+    "ok",
+  );
+  assert.equal(
+    confirmFreshBody({ readable: true, revision: 4, expectedRevision: 4, sha: "cd".repeat(32), expectedSha: sha }),
+    "mismatch",
+  );
+  assert.equal(
+    confirmFreshBody({ readable: false, revision: null, expectedRevision: 4, sha: null, expectedSha: sha }),
+    "unread",
+  );
+  assert.equal(healMayPublish({ commitRevision: null, publicRevision: 3 }), false);
+  assert.equal(healMayPublish({ commitRevision: 4, publicRevision: 4 }), false);
+  assert.equal(healMayPublish({ commitRevision: 4, publicRevision: 3 }), true);
+  assert.equal(healMayPublish({ commitRevision: 4, publicRevision: null }), true);
 });

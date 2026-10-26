@@ -183,6 +183,79 @@ export function publicReadCost(saves: number, pageSize = 1000): { listRequests: 
 
 export const STORE_OUTAGE = "Magazyn treści jest chwilowo niedostępny. Zapis został zatrzymany. Nic nie zostało cofnięte.";
 
+/** Zapis doszedł do PUT, ale odczyt potwierdzający nie rozstrzygnął wyniku. Nie wolno ogłaszać, że na pewno nic nie zapisano. */
+export const UNCERTAIN_SAVE =
+  "Nie udało się potwierdzić zapisu. Odśwież stronę i sprawdź treść, zanim zapiszesz ponownie.";
+
+/** Odtworzenie mogło się zapisać, ale ponowny odczyt tego nie potwierdził. Całego odtwarzania nie wolno puszczać drugi raz. */
+export const UNCERTAIN_RESTORE =
+  "Odtworzenie nie dało się potwierdzić odczytem. Kopia źródłowa nie została skasowana. Odśwież stronę i sprawdź treść, zanim uruchomisz odtwarzanie ponownie.";
+
+/**
+ * Ile odczytów wolno zrobić dla pliku, którego adres właśnie wrócił z PUT.
+ * Pierwsza próba jest natychmiastowa. Zwykły odczyt strony tego nie używa.
+ */
+export const FRESH_READ_LIMIT = 6;
+
+let freshDelayScale = 1;
+
+/** Testy ustawiają 0, żeby nie czekać. Produkcja zostawia 1. */
+export function setFreshReadDelayScaleForTests(scale: number) {
+  freshDelayScale = scale > 0 ? scale : 0;
+}
+
+/** Przerwy przed próbą 1..5. Suma przy skali 1: 6 s. Próba 0 nie czeka. */
+export function freshReadDelayMs(attempt: number): number {
+  if (attempt <= 0) return 0;
+  const gaps = [400, 800, 1200, 1600, 2000];
+  const base = gaps[Math.min(attempt - 1, gaps.length - 1)] ?? 2000;
+  return Math.round(base * freshDelayScale);
+}
+
+/**
+ * Ponawiamy wyłącznie 404 tuż po PUT znanego adresu.
+ * 500, 503 i sieć (status 0) zatrzymują od razu — nie wolno z nich zrobić sukcesu.
+ */
+export function freshReadDecision(status: number, attempt: number, limit = FRESH_READ_LIMIT): "ok" | "retry" | "stop" {
+  if (status >= 200 && status < 300) return "ok";
+  if (status === 404 && attempt + 1 < limit) return "retry";
+  return "stop";
+}
+
+export function waitFreshRead(attempt: number) {
+  const ms = freshReadDelayMs(attempt);
+  if (ms <= 0) return Promise.resolve();
+  return new Promise<void>((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Publikacja doganiająca wolno tylko ze znacznika zatwierdzenia.
+ * Sam dziennik prywatny, bez znacznika, nie jest zgodą na publikację.
+ * Gdy publiczny dziennik jest już przy tej rewizji, nie publikujemy drugi raz.
+ */
+export function healMayPublish(input: { commitRevision: number | null; publicRevision: number | null }): boolean {
+  if (input.commitRevision == null || !Number.isInteger(input.commitRevision) || input.commitRevision < 1) return false;
+  if (input.publicRevision != null && input.publicRevision >= input.commitRevision) return false;
+  return true;
+}
+
+/**
+ * Treść tuż po PUT jest przyjęta tylko z oczekiwaną rewizją i SHA-256.
+ * Zła suma nie jest sukcesem. Brak odczytu nie uprawnia do starszej wersji.
+ */
+export function confirmFreshBody(input: {
+  readable: boolean;
+  revision: number | null;
+  expectedRevision: number;
+  sha: string | null;
+  expectedSha: string;
+}): "ok" | "mismatch" | "unread" {
+  if (!input.readable) return "unread";
+  if (input.revision !== input.expectedRevision) return "mismatch";
+  if (!input.sha || input.sha !== input.expectedSha) return "mismatch";
+  return "ok";
+}
+
 /**
  * Uszkodzony pojedynczy plik można pominąć. Chwilowa awaria, brak klucza i błąd sieci
  * zatrzymują odczyt — nie wolno wtedy przyjąć starszej wersji za aktualną.

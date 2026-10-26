@@ -79,6 +79,7 @@ const JOURNAL_PUBLIC = "zielarka/journal/public/";
 const JOURNAL_PRIVATE = "zielarka/journal/private/";
 const JOURNAL_COMMIT = "zielarka/journal/commit/";
 const PUBLIC_CURRENT = "zielarka/journal/public/current.json";
+const PRIVATE_CURRENT = "zielarka/journal/private/current.json";
 const BACKUPS = "zielarka/backups/";
 const INBOX = "zielarka/restore-inbox/";
 const SEALED_IMAGES = "zielarka/sealed-images/";
@@ -96,6 +97,34 @@ export function resetPublicCacheForTests() {
 
 function token() {
   return process.env.BLOB_READ_WRITE_TOKEN?.trim() || "";
+}
+
+function publicBlobUrl(pathname: string): string {
+  const id = /^vercel_blob_rw_([A-Za-z0-9]+)_/.exec(token())?.[1] ?? "";
+  if (!id || pathname.includes("..") || pathname.startsWith("/")) return "";
+  return `https://${id.toLowerCase()}.public.blob.vercel-storage.com/${pathname}`;
+}
+
+async function fetchCdn(url: string): Promise<{ status: number; body: string }> {
+  let res: Response;
+  try {
+    res = await fetch(url);
+  } catch {
+    throw new Error(STORE_OUTAGE);
+  }
+  return { status: res.status, body: res.ok ? await res.text() : "" };
+}
+
+async function fetchCdnDoc(url: string): Promise<SiteEdits> {
+  const got = await fetchCdn(url);
+  if (got.status === 404) throw new Error("Odczyt treści nie powiódł się (404).");
+  if (got.status < 200 || got.status >= 300) throw new Error(`Odczyt treści nie powiódł się (${got.status}).`);
+  try {
+    return unwrapDoc(JSON.parse(got.body));
+  } catch (error) {
+    if (error instanceof Error && error.message === "Kopia jest uszkodzona.") throw error;
+    throw new Error("Kopia jest uszkodzona.");
+  }
 }
 
 export function passwordOk(given: string) {
@@ -138,7 +167,7 @@ export async function editorGate(password: string, key: string) {
 
 const BLOB_API = "11";
 
-async function blobPut(pathname: string, body: BodyInit, contentType: string) {
+async function blobPut(pathname: string, body: BodyInit, contentType: string, maxAge?: number) {
   const key = token();
   if (!key) throw new Error("Brak magazynu zdjęć.");
   const url = `https://vercel.com/api/blob/?${new URLSearchParams({ pathname })}`;
@@ -150,7 +179,7 @@ async function blobPut(pathname: string, body: BodyInit, contentType: string) {
       "x-content-type": contentType,
       "x-add-random-suffix": "0",
       "x-allow-overwrite": "1",
-      "x-cache-control-max-age": contentType.startsWith("image/") ? "86400" : "60",
+      "x-cache-control-max-age": String(maxAge ?? (contentType.startsWith("image/") ? 86400 : 60)),
     },
     body,
   });
@@ -511,6 +540,28 @@ async function loadLegacy(): Promise<SiteEdits | null> {
 
 async function loadPrivateFresh(): Promise<SiteEdits> {
   let saw = false;
+  const privatePointerUrl = publicBlobUrl(PRIVATE_CURRENT);
+  if (privatePointerUrl) {
+    try {
+      const got = await fetchCdn(privatePointerUrl);
+      if (got.status === 200) {
+        const opened = openJson(JSON.parse(got.body)) as { revision?: unknown; url?: unknown; sha?: unknown } | null;
+        if (!opened || typeof opened.revision !== "number" || typeof opened.url !== "string" || typeof opened.sha !== "string") {
+          throw new Error("Kopia jest uszkodzona.");
+        }
+        const doc = await fetchDoc(opened.url);
+        if (doc.revision !== opened.revision || payloadSha(canonicalEdits(doc)) !== opened.sha) {
+          throw new Error("Kopia jest uszkodzona.");
+        }
+        return doc;
+      }
+      if (got.status !== 404) throw new Error(`Odczyt treści nie powiódł się (${got.status}).`);
+    } catch (error) {
+      if (!(error instanceof Error) || !/Odczyt treści nie powiódł się \(404\)/.test(error.message)) {
+        throw error instanceof Error ? error : new Error(STORE_OUTAGE);
+      }
+    }
+  }
   const journals = (await blobList(JOURNAL_PRIVATE))
     .filter((blob) => blob.pathname && isNumberedJournal(blob.pathname) && readUrl(blob))
     .sort((a, b) => revisionFromPath(String(b.pathname)) - revisionFromPath(String(a.pathname)));
@@ -545,22 +596,70 @@ async function loadPrivateFresh(): Promise<SiteEdits> {
   return empty();
 }
 
-async function writePublicPointer(revision: number, url: string, sha: string) {
-  try {
-    const head = await blobHead(PUBLIC_CURRENT);
-    if (head && readUrl(head)) {
-      const prev = (await fetchJson(readUrl(head))) as { revision?: unknown };
-      if (typeof prev.revision === "number" && prev.revision > revision) return;
+async function writePointer(pathname: string, revision: number, url: string, sha: string, sealed: boolean) {
+  const head = await blobHead(pathname);
+  if (head && readUrl(head)) {
+    try {
+      const raw = sealed ? openJson(await fetchJson(readUrl(head))) : await fetchJson(readUrl(head));
+      const prev = raw as { revision?: unknown };
+      if (prev && typeof prev.revision === "number" && prev.revision > revision) return;
+    } catch {
+      // Nieczytelny skrót nadpisujemy.
     }
-    await blobPut(PUBLIC_CURRENT, JSON.stringify({ revision, url, sha }), "application/json");
-  } catch {
-    // Dziennik publiczny jest już zapisany. Odczyt bierze najwyższy numer, nie ten skrót.
-    // Skrót nie cofa strony, nawet gdy jego zapis się nie uda albo spóźni.
   }
+  const plain = JSON.stringify(sealed ? { revision, url, sha } : { revision, url, sha, committed: true });
+  const saved = await blobPut(pathname, sealed ? sealJson(plain) : plain, "application/json", 120);
+  await confirmPointer(saved.url, { revision, url, sha }, sealed);
+}
+
+async function writePublicPointer(revision: number, url: string, sha: string) {
+  await writePointer(PUBLIC_CURRENT, revision, url, sha, false);
+}
+
+async function writePrivatePointer(revision: number, url: string, sha: string) {
+  await writePointer(PRIVATE_CURRENT, revision, url, sha, true);
 }
 
 async function loadPublic(): Promise<SiteEdits> {
   if (publicCache && Date.now() - publicCache.at < PUBLIC_CACHE_MS) return publicCache.data;
+  const pointerUrl = publicBlobUrl(PUBLIC_CURRENT);
+  if (!pointerUrl) return empty();
+  try {
+    const got = await fetchCdn(pointerUrl);
+    if (got.status === 404) return loadPublicLegacy();
+    if (got.status < 200 || got.status >= 300) throw new Error(`Odczyt treści nie powiódł się (${got.status}).`);
+    let row: { revision?: unknown; url?: unknown; sha?: unknown; committed?: unknown };
+    try {
+      row = JSON.parse(got.body) as { revision?: unknown; url?: unknown; sha?: unknown; committed?: unknown };
+    } catch {
+      throw new Error("Kopia jest uszkodzona.");
+    }
+    if (row.committed === false) throw new Error("Kopia jest uszkodzona.");
+    if (typeof row.revision !== "number" || typeof row.url !== "string" || !row.url || typeof row.sha !== "string") {
+      throw new Error("Kopia jest uszkodzona.");
+    }
+    const doc = await fetchCdnDoc(row.url);
+    if (
+      confirmFreshBody({
+        readable: true,
+        revision: doc.revision,
+        expectedRevision: row.revision,
+        sha: payloadSha(canonicalEdits(doc)),
+        expectedSha: row.sha,
+      }) !== "ok"
+    ) {
+      throw new Error("Kopia jest uszkodzona.");
+    }
+    const published = toPublicDoc(doc);
+    publicCache = { at: Date.now(), data: published };
+    return published;
+  } catch (error) {
+    if (publicCache) return publicCache.data;
+    throw error;
+  }
+}
+
+async function loadPublicLegacy(): Promise<SiteEdits> {
   try {
     const journals = (await blobList(JOURNAL_PUBLIC))
       .filter((blob) => blob.pathname && isNumberedJournal(blob.pathname) && readUrl(blob))
@@ -589,6 +688,7 @@ async function loadPublic(): Promise<SiteEdits> {
         }
       }
     }
+    if (journals.length > 0) throw new Error("Aktywna treść jest uszkodzona.");
     const pubs = (await blobList(PUBLIC_DOCS))
       .filter((blob) => blob.pathname && readUrl(blob))
       .sort((a, b) => blobStamp(b) - blobStamp(a) || String(b.pathname).localeCompare(String(a.pathname)));
@@ -716,7 +816,7 @@ async function writeEdits(doc: SiteEdits, afterPrivate?: (written: SiteEdits) =>
     privateUrl = (await blobPut(privatePath, sealJson(privateStamp.text), "application/json")).url;
     const check = await fetchFreshDoc(privateUrl, next.revision, privateStamp.sha);
     if (afterPrivate) await afterPrivate(check);
-    publicUrl = (await blobPut(publicPath, publicStamp.text, "application/json")).url;
+    publicUrl = (await blobPut(publicPath, publicStamp.text, "application/json", 31_536_000)).url;
     await fetchFreshDoc(publicUrl, next.revision, publicStamp.sha);
     const privatePointer = { revision: next.revision, url: privateUrl, sha: privateStamp.sha };
     const privateJournal = await blobPut(
@@ -736,29 +836,38 @@ async function writeEdits(doc: SiteEdits, afterPrivate?: (written: SiteEdits) =>
       throw new Error("Zapis nie powiódł się (500). Publikacja nie została wykonana.");
     }
     if (publishedState !== "COMMITTED") throw new Error(UNCERTAIN_SAVE);
+    const commit = await blobPut(
+      `${JOURNAL_COMMIT}${padRevision(next.revision)}.json`,
+      JSON.stringify({ revision: next.revision, sha: privateStamp.sha, publicSha: publicStamp.sha }),
+      "application/json",
+    );
+    let commitRow: { revision?: unknown; sha?: unknown; publicSha?: unknown };
     try {
-      const commit = await blobPut(
-        `${JOURNAL_COMMIT}${padRevision(next.revision)}.json`,
-        JSON.stringify({ revision: next.revision, sha: privateStamp.sha, publicSha: publicStamp.sha }),
-        "application/json",
-      );
-      const raw = (await fetchFreshJson(commit.url)) as { revision?: unknown; sha?: unknown; publicSha?: unknown };
-      if (raw.revision !== next.revision || raw.sha !== privateStamp.sha || raw.publicSha !== publicStamp.sha) {
-        throw new Error("Kopia jest uszkodzona.");
-      }
-    } catch (error) {
-      console.error(error instanceof Error ? error.message : "Znacznik zatwierdzenia nie został potwierdzony.");
+      commitRow = (await fetchFreshJson(commit.url)) as { revision?: unknown; sha?: unknown; publicSha?: unknown };
+    } catch {
+      throw new Error(UNCERTAIN_SAVE);
     }
-    await writePublicPointer(next.revision, publicUrl, publicStamp.sha);
+    if (commitRow.revision !== next.revision || commitRow.sha !== privateStamp.sha || commitRow.publicSha !== publicStamp.sha) {
+      throw new Error("Kopia jest uszkodzona.");
+    }
+    try {
+      await writePublicPointer(next.revision, publicUrl, publicStamp.sha);
+      await writePrivatePointer(next.revision, privateUrl, privateStamp.sha);
+    } catch (error) {
+      if (error instanceof Error && error.message === "Kopia jest uszkodzona.") throw error;
+      throw new Error(UNCERTAIN_SAVE);
+    }
     publicCache = { at: Date.now(), data: published };
   } catch (error) {
     if (lockUrl) await blobDelete([lockUrl]);
     throw error;
   }
-  try {
-    await prune(LOCKS, 40, lockPath);
-  } catch {
-    // Starsze kopie zostają. Bieżący zapis już jest.
+  if (next.revision % 25 === 0) {
+    try {
+      await prune(LOCKS, 40, lockPath);
+    } catch {
+      // Starsze blokady zostają. Bieżący zapis już jest.
+    }
   }
   return next.revision;
 }
@@ -986,6 +1095,7 @@ async function healPublic() {
     "application/json",
   );
   await writePublicPointer(commit.revision, saved.url, stamp.sha);
+  await writePrivatePointer(commit.revision, priv.url, priv.sha);
   publicCache = { at: Date.now(), data: published };
 }
 
@@ -1006,7 +1116,23 @@ async function expandSealedImages(doc: SiteEdits) {
 
 export async function readEditorDoc() {
   try {
-    await healPublic();
+    const pub = publicBlobUrl(PUBLIC_CURRENT);
+    const priv = publicBlobUrl(PRIVATE_CURRENT);
+    let aligned = false;
+    if (pub && priv) {
+      const [a, b] = await Promise.all([fetchCdn(pub), fetchCdn(priv)]);
+      if (a.status === 200 && b.status === 200) {
+        const left = JSON.parse(a.body) as { revision?: unknown };
+        const right = openJson(JSON.parse(b.body)) as { revision?: unknown } | null;
+        aligned =
+          typeof left.revision === "number" &&
+          !!right &&
+          typeof right.revision === "number" &&
+          left.revision === right.revision &&
+          left.revision > 0;
+      }
+    }
+    if (!aligned) await healPublic();
   } catch {
     // Prywatna kopia zostaje. Publiczna dogoni się przy kolejnym zapisie.
   }
@@ -1018,23 +1144,22 @@ export function publishedHerbs(doc: SiteEdits) {
 }
 
 async function readAttempt(id: string): Promise<AttemptRow | null> {
-  const latest = newest(await blobList(`${AUTH}${id}/`));
-  if (!latest) return null;
-  const res = await fetch(readUrl(latest), { cache: "no-store" });
-  if (!res.ok) return null;
-  const data = (await res.json()) as Partial<AttemptRow>;
-  if (typeof data.count !== "number" || typeof data.until !== "number") return null;
-  return { count: data.count, until: data.until };
+  const url = publicBlobUrl(`${AUTH}${id}.json`);
+  if (!url) return null;
+  try {
+    const res = await fetch(url, { cache: "no-store" });
+    if (res.status === 404) return null;
+    if (!res.ok) return null;
+    const data = (await res.json()) as Partial<AttemptRow>;
+    if (typeof data.count !== "number" || typeof data.until !== "number") return null;
+    return { count: data.count, until: data.until };
+  } catch {
+    return null;
+  }
 }
 
 async function writeAttempt(id: string, row: AttemptRow) {
-  const pathname = `${AUTH}${id}/${Date.now()}.json`;
-  await blobPut(pathname, JSON.stringify(row), "application/json");
-  try {
-    await prune(`${AUTH}${id}/`, 1, pathname);
-  } catch {
-    // Licznik jest już zapisany.
-  }
+  await blobPut(`${AUTH}${id}.json`, JSON.stringify(row), "application/json", 0);
 }
 
 export async function backupStatus() {

@@ -29,6 +29,14 @@ import {
   type BackupFile,
 } from "./backup-bundle.ts";
 import { OFFSITE_AUTOMATIC, offsiteDecision, offsiteExportAllowed } from "./backup-wire.ts";
+import {
+  deliverOffsite,
+  offsiteObjectKey,
+  offsiteSendAllowed,
+  planOffsiteRetention,
+  previewOffsitePut,
+  readOffsiteTarget,
+} from "./offsite-r2.ts";
 import { openJson, sealJson } from "./draft-seal.server.ts";
 import { parseStoredEntry } from "./entries.ts";
 import {
@@ -673,4 +681,54 @@ test("próba odzyskania w pamięci przechodzi, a SKIPPED nie jest sukcesem", asy
     if (previous === undefined) delete process.env.CMS_SEAL_KEY;
     else process.env.CMS_SEAL_KEY = previous;
   }
+});
+
+test("kopia poza Vercel jest opisana i nie wysyła", async () => {
+  const { readFileSync } = await import("node:fs");
+  const source = readFileSync(new URL("./site-store.server.ts", import.meta.url), "utf8");
+  assert.equal(source.includes("offsite-r2"), false);
+  assert.equal(source.includes("deliverOffsite"), false);
+  assert.equal(OFFSITE_AUTOMATIC, false);
+  assert.equal(offsiteSendAllowed({ ZIELARKA_OFFSITE_APPROVED: "tak", R2_BUCKET: "kopie" }), false);
+  assert.equal(offsiteDecision("https://abc.r2.cloudflarestorage.com").sent, false);
+  assert.equal(readOffsiteTarget({}), null);
+  assert.equal(
+    readOffsiteTarget({
+      R2_ENDPOINT: "https://evil.example",
+      R2_BUCKET: "kopie",
+      R2_ACCESS_KEY_ID: "a",
+      R2_SECRET_ACCESS_KEY: "b",
+    }),
+    null,
+  );
+  const target = readOffsiteTarget({
+    R2_ENDPOINT: "https://abc.r2.cloudflarestorage.com",
+    R2_BUCKET: "zielarka-kopie",
+    R2_ACCESS_KEY_ID: "klucz",
+    R2_SECRET_ACCESS_KEY: "sekret",
+  });
+  assert.ok(target);
+  const sha = "ab".repeat(32);
+  const preview = previewOffsitePut(target, offsiteObjectKey("daily", "2026-10-26T00:00:00.000Z", sha), sha);
+  assert.equal(preview.method, "PUT");
+  assert.equal(preview.url.startsWith("https://abc.r2.cloudflarestorage.com/"), true);
+  assert.equal(preview.url.includes("blob.vercel-storage.com"), false);
+  let called = false;
+  const delivered = await deliverOffsite({
+    armed: true,
+    transport: async () => {
+      called = true;
+    },
+  });
+  assert.equal(delivered.sent, false);
+  assert.equal(called, false);
+  const now = Date.parse("2026-10-26T00:00:00.000Z");
+  const plan = planOffsiteRetention([
+    { key: "nowa", uploadedAt: now },
+    { key: "stara", uploadedAt: now - 40 * 86_400_000 },
+    { key: "bez-daty", uploadedAt: 0 },
+  ]);
+  assert.equal(plan.drop.includes("nowa"), false);
+  assert.equal(plan.drop.includes("bez-daty"), false);
+  assert.equal(plan.keep.includes("nowa"), true);
 });

@@ -82,6 +82,11 @@ function empty(): SiteEdits {
 
 let publicCache: { at: number; data: SiteEdits } | null = null;
 
+/** Tylko testy. Produkcja nie woła tej funkcji. */
+export function resetPublicCacheForTests() {
+  publicCache = null;
+}
+
 function token() {
   return process.env.BLOB_READ_WRITE_TOKEN?.trim() || "";
 }

@@ -51,6 +51,7 @@ test("świeży Blob: 404, zła suma, przerwana publikacja i odtworzenie", async 
   let flipServes = 0;
   let blockPublic = 0;
   let laterJournalMisses = 0;
+  let stalePrivateCdn = "";
   const seenJournal = new Set<string>();
   const original = globalThis.fetch;
   setFreshReadDelayScaleForTests(0);
@@ -83,6 +84,10 @@ test("świeży Blob: 404, zła suma, przerwana publikacja i odtworzenie", async 
       if (blockPublic && pathname === "zielarka/journal/public/current.json") {
         calls.push(`CDN ${blockPublic}`);
         return new Response("limit", { status: blockPublic });
+      }
+      if (pathname === "zielarka/journal/private/current.json" && init?.cache !== "no-store" && stalePrivateCdn) {
+        calls.push("CDN-STALE private");
+        return new Response(stalePrivateCdn, { status: 200 });
       }
       if (pathname.startsWith("zielarka/private/") && !pathname.includes("/journal/")) {
         if (alwaysMissPrivate && !readablePrivate.has(pathname)) {
@@ -273,6 +278,15 @@ test("świeży Blob: 404, zła suma, przerwana publikacja i odtworzenie", async 
     await readEditorDoc();
     resetPublicCacheForTests();
     assert.equal((await readPublicEdits()).copy["home.note"], "zostaje");
+    stalePrivateCdn = files.get("zielarka/journal/private/current.json")?.body.toString("utf8") || "";
+    assert.ok(stalePrivateCdn.length > 20);
+    const edited = await saveCopy("home.note", "z-edytora", kept);
+    assert.equal(edited, kept + 1);
+    const seen = await readEditorDoc();
+    assert.equal(seen.revision, edited);
+    assert.equal(seen.copy["home.note"], "z-edytora");
+    assert.equal(calls.some((item) => item === "CDN-STALE private"), false, "edytor nie bierze starego wskaźnika z CDN");
+    stalePrivateCdn = "";
     for (const path of [...files.keys()]) {
       if (
         path.startsWith("zielarka/journal/public/") ||

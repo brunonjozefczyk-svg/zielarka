@@ -106,9 +106,18 @@ function publicBlobUrl(pathname: string): string {
 }
 
 async function fetchCdn(url: string): Promise<{ status: number; body: string }> {
+  return readBlob(url, false);
+}
+
+/** Zapis i odczyt edytora. Stały adres wskaźnika nie może wrócić z CDN, bo drugi zapis widziałby starą wersję. */
+async function fetchStore(url: string): Promise<{ status: number; body: string }> {
+  return readBlob(url, true);
+}
+
+async function readBlob(url: string, fresh: boolean): Promise<{ status: number; body: string }> {
   let res: Response;
   try {
-    res = await fetch(url);
+    res = await fetch(url, fresh ? { cache: "no-store" } : undefined);
   } catch {
     throw new Error(STORE_OUTAGE);
   }
@@ -184,7 +193,8 @@ async function blobPut(pathname: string, body: BodyInit, contentType: string, ma
     body,
   });
   if (!res.ok) {
-    throw new Error(`Zapis nie powiódł się (${res.status}).`);
+    const detail = await res.text();
+    throw blobWriteError(res.status, detail);
   }
   return (await res.json()) as { url: string; downloadUrl?: string };
 }
@@ -210,6 +220,13 @@ async function blobCreate(pathname: string, body: string) {
     return { status: res.status, body: "", url: data.url ?? "" };
   }
   return { status: res.status, body: await res.text(), url: "" };
+}
+
+function blobWriteError(status: number, body: string) {
+  if (status === 403 && /store_suspended|limits-exceeded|suspended/i.test(body)) {
+    return new Error("Magazyn Vercel jest wstrzymany, bo darmowy limit się wyczerpał. Zapis w edytorze wróci po odblokowaniu. Nic nie zostało skasowane.");
+  }
+  return new Error(`Zapis nie powiódł się (${status}).`);
 }
 
 type BlobMeta = { url?: string; downloadUrl?: string; pathname?: string; uploadedAt?: string | number };
@@ -543,7 +560,7 @@ async function loadPrivateFresh(): Promise<SiteEdits> {
   const privatePointerUrl = publicBlobUrl(PRIVATE_CURRENT);
   if (privatePointerUrl) {
     try {
-      const got = await fetchCdn(privatePointerUrl);
+      const got = await fetchStore(privatePointerUrl);
       if (got.status === 200) {
         const opened = openJson(JSON.parse(got.body)) as { revision?: unknown; url?: unknown; sha?: unknown } | null;
         if (!opened || typeof opened.revision !== "number" || typeof opened.url !== "string" || typeof opened.sha !== "string") {
@@ -596,7 +613,7 @@ async function loadPrivateFresh(): Promise<SiteEdits> {
   return empty();
 }
 
-async function writePointer(pathname: string, revision: number, url: string, sha: string, sealed: boolean) {
+async function writePointer(pathname: string, revision: number, url: string, sha: string, sealed: boolean, maxAge = 120) {
   const head = await blobHead(pathname);
   if (head && readUrl(head)) {
     try {
@@ -608,7 +625,7 @@ async function writePointer(pathname: string, revision: number, url: string, sha
     }
   }
   const plain = JSON.stringify(sealed ? { revision, url, sha } : { revision, url, sha, committed: true });
-  const saved = await blobPut(pathname, sealed ? sealJson(plain) : plain, "application/json", 120);
+  const saved = await blobPut(pathname, sealed ? sealJson(plain) : plain, "application/json", maxAge);
   await confirmPointer(saved.url, { revision, url, sha }, sealed);
 }
 
@@ -617,7 +634,7 @@ async function writePublicPointer(revision: number, url: string, sha: string) {
 }
 
 async function writePrivatePointer(revision: number, url: string, sha: string) {
-  await writePointer(PRIVATE_CURRENT, revision, url, sha, true);
+  await writePointer(PRIVATE_CURRENT, revision, url, sha, true, 0);
 }
 
 async function loadPublic(): Promise<SiteEdits> {
@@ -774,7 +791,7 @@ async function claimLock(revision: number) {
   const first = await blobCreate(lockPath, String(Date.now()));
   if (lockDecision(first.status, first.body, 0) === "claimed" && first.url) return first.url;
   const decision = lockDecision(first.status, first.body, await lockAge(lockPath));
-  if (decision === "fail") throw new Error(`Zapis nie powiódł się (${first.status}).`);
+  if (decision === "fail") throw blobWriteError(first.status, first.body);
   if (decision === "busy") throw new Error("Ktoś zapisał w międzyczasie. Odśwież stronę.");
   const blobs = await blobList(LOCKS);
   const existing = blobs.find((blob) => blob.pathname === lockPath);
@@ -1120,7 +1137,7 @@ export async function readEditorDoc() {
     const priv = publicBlobUrl(PRIVATE_CURRENT);
     let aligned = false;
     if (pub && priv) {
-      const [a, b] = await Promise.all([fetchCdn(pub), fetchCdn(priv)]);
+      const [a, b] = await Promise.all([fetchStore(pub), fetchStore(priv)]);
       if (a.status === 200 && b.status === 200) {
         const left = JSON.parse(a.body) as { revision?: unknown };
         const right = openJson(JSON.parse(b.body)) as { revision?: unknown } | null;

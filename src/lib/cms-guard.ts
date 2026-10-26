@@ -179,6 +179,95 @@ export function publicReadCost(saves: number, _pageSize = 1000): { listRequests:
   return { listRequests: 0, documentRequests: 2 };
 }
 
+/** Nowy wskaźnik jest publiczny tylko z jawnym committed: true, rewizją i SHA-256. Sam brak false nie wystarcza. */
+export function acceptPublicPointer(row: {
+  revision?: unknown;
+  url?: unknown;
+  sha?: unknown;
+  committed?: unknown;
+} | null): boolean {
+  if (!row || row.committed !== true) return false;
+  if (typeof row.revision !== "number" || !Number.isInteger(row.revision) || row.revision < 1) return false;
+  if (typeof row.url !== "string" || row.url.length < 8) return false;
+  if (typeof row.sha !== "string" || !JOURNAL_SHA.test(row.sha)) return false;
+  return true;
+}
+
+export type CutoverPlan = {
+  action: "already" | "ready" | "stop";
+  reason: string;
+  revision: number;
+  url: string;
+  sha: string;
+};
+
+/**
+ * Jednorazowa decyzja przejścia na current.json. Nie zapisuje.
+ * Brak odpowiedzi nie jest pustą bazą. Nowszy dziennik bez znacznika zatrzymuje operację.
+ * Stary dziennik przechodzi tylko, gdy nie ma żadnego znacznika, a jego suma zgadza się z dokumentem.
+ */
+export function cutoverDecision(input: {
+  storeAnswered: boolean;
+  pointerStatus: number | null;
+  pointer: { revision?: unknown; url?: unknown; sha?: unknown; committed?: unknown } | null;
+  pointerDocMatches: boolean;
+  historyAnswered: boolean;
+  commitUnreadable: boolean;
+  commits: readonly { revision: number; publicSha: string }[] | null;
+  journals: readonly { revision: number; url: string; sha: string; docMatches: boolean; draft: boolean }[] | null;
+}): CutoverPlan {
+  const stop = (reason: string): CutoverPlan => ({ action: "stop", reason, revision: 0, url: "", sha: "" });
+  if (!input.storeAnswered) return stop("Magazyn nie odpowiedział. Nic nie zostało uznane za puste.");
+  if (input.pointerStatus != null && input.pointerStatus !== 200 && input.pointerStatus !== 404) {
+    return stop("Odczyt wskaźnika nie jest pewny. Migracja nie ruszyła.");
+  }
+  if (input.pointerStatus === 200) {
+    if (acceptPublicPointer(input.pointer) && input.pointerDocMatches && input.pointer) {
+      return {
+        action: "already",
+        reason: "Wskaźnik jest już zatwierdzony.",
+        revision: input.pointer.revision as number,
+        url: input.pointer.url as string,
+        sha: input.pointer.sha as string,
+      };
+    }
+    return stop("Wskaźnik nie ma jednoznacznego zatwierdzenia. Migracja nie ruszyła.");
+  }
+  if (!input.historyAnswered || !input.commits || !input.journals) {
+    return stop("Historii nie da się potwierdzić. Migracja nie ruszyła.");
+  }
+  if (input.commitUnreadable) return stop("Znacznik zatwierdzenia jest niepewny. Migracja nie ruszyła.");
+  if (input.commits.length > 0) {
+    const best = input.commits.reduce((left, right) => (left.revision > right.revision ? left : right));
+    if (input.journals.some((journal) => journal.revision > best.revision)) {
+      return stop("Jest nowszy dziennik bez zatwierdzenia. Wskaźnik nie został utworzony.");
+    }
+    const journal = input.journals.find(
+      (item) => item.revision === best.revision && item.sha === best.publicSha && item.docMatches && !item.draft,
+    );
+    if (!journal) return stop("Zatwierdzona rewizja nie zgadza się z dziennikiem. Wskaźnik nie został utworzony.");
+    return {
+      action: "ready",
+      reason: "Można utworzyć wskaźnik zatwierdzonej rewizji.",
+      revision: journal.revision,
+      url: journal.url,
+      sha: journal.sha,
+    };
+  }
+  if (input.journals.length === 0) return stop("Brak zatwierdzonego dziennika. Wskaźnik nie został utworzony.");
+  const newest = input.journals.reduce((left, right) => (left.revision > right.revision ? left : right));
+  if (!newest.docMatches || newest.draft || !JOURNAL_SHA.test(newest.sha) || !newest.url) {
+    return stop("Najnowszy stary dziennik nie jest kompletny. Starszego nie podstawiam.");
+  }
+  return {
+    action: "ready",
+    reason: "Stary dziennik ma zgodną sumę. Wskaźnik powstanie dopiero na polecenie.",
+    revision: newest.revision,
+    url: newest.url,
+    sha: newest.sha,
+  };
+}
+
 export const STORE_OUTAGE = "Magazyn treści jest chwilowo niedostępny. Zapis został zatrzymany. Nic nie zostało cofnięte.";
 
 /** Zapis doszedł do PUT, ale odczyt potwierdzający nie rozstrzygnął wyniku. Nie wolno ogłaszać, że na pewno nic nie zapisano. */

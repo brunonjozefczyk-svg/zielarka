@@ -9,7 +9,6 @@ import {
   expiredInboxUrls,
   nextAttempt,
   publicJournalFailure,
-  readFailureAction,
   STORE_OUTAGE,
   throwIfUncertain,
   toPublicDoc,
@@ -25,6 +24,9 @@ import {
   freshReadDecision,
   healMayPublish,
   waitFreshRead,
+  acceptPublicPointer,
+  cutoverDecision,
+  type CutoverPlan,
   type AttemptRow,
   type StampBlob,
 } from "./cms-guard";
@@ -89,10 +91,12 @@ function empty(): SiteEdits {
 }
 
 let publicCache: { at: number; data: SiteEdits } | null = null;
+let cutoverLatch: CutoverPlan | null = null;
 
 /** Tylko testy. Produkcja nie woła tej funkcji. */
 export function resetPublicCacheForTests() {
   publicCache = null;
+  cutoverLatch = null;
 }
 
 function token() {
@@ -630,7 +634,7 @@ async function writePointer(pathname: string, revision: number, url: string, sha
 }
 
 async function writePublicPointer(revision: number, url: string, sha: string) {
-  await writePointer(PUBLIC_CURRENT, revision, url, sha, false);
+  await writePointer(PUBLIC_CURRENT, revision, url, sha, false, 0);
 }
 
 async function writePrivatePointer(revision: number, url: string, sha: string) {
@@ -642,8 +646,11 @@ async function loadPublic(): Promise<SiteEdits> {
   const pointerUrl = publicBlobUrl(PUBLIC_CURRENT);
   if (!pointerUrl) return empty();
   try {
-    const got = await fetchCdn(pointerUrl);
-    if (got.status === 404) return loadPublicLegacy();
+    const got = await fetchStore(pointerUrl);
+    if (got.status === 404) {
+      publicCache = null;
+      return empty();
+    }
     if (got.status < 200 || got.status >= 300) throw new Error(`Odczyt treści nie powiódł się (${got.status}).`);
     let row: { revision?: unknown; url?: unknown; sha?: unknown; committed?: unknown };
     try {
@@ -651,18 +658,15 @@ async function loadPublic(): Promise<SiteEdits> {
     } catch {
       throw new Error("Kopia jest uszkodzona.");
     }
-    if (row.committed === false) throw new Error("Kopia jest uszkodzona.");
-    if (typeof row.revision !== "number" || typeof row.url !== "string" || !row.url || typeof row.sha !== "string") {
-      throw new Error("Kopia jest uszkodzona.");
-    }
-    const doc = await fetchCdnDoc(row.url);
+    if (!acceptPublicPointer(row)) throw new Error("Kopia jest uszkodzona.");
+    const doc = await fetchCdnDoc(row.url as string);
     if (
       confirmFreshBody({
         readable: true,
         revision: doc.revision,
-        expectedRevision: row.revision,
+        expectedRevision: row.revision as number,
         sha: payloadSha(canonicalEdits(doc)),
-        expectedSha: row.sha,
+        expectedSha: row.sha as string,
       }) !== "ok"
     ) {
       throw new Error("Kopia jest uszkodzona.");
@@ -670,63 +674,6 @@ async function loadPublic(): Promise<SiteEdits> {
     const published = toPublicDoc(doc);
     publicCache = { at: Date.now(), data: published };
     return published;
-  } catch (error) {
-    if (publicCache) return publicCache.data;
-    throw error;
-  }
-}
-
-async function loadPublicLegacy(): Promise<SiteEdits> {
-  try {
-    const journals = (await blobList(JOURNAL_PUBLIC))
-      .filter((blob) => blob.pathname && isNumberedJournal(blob.pathname) && readUrl(blob))
-      .sort((a, b) => revisionFromPath(String(b.pathname)) - revisionFromPath(String(a.pathname)));
-    const newest = selectPublicRevision(journals.map((blob) => revisionFromPath(String(blob.pathname))));
-    // current.json nie rozstrzyga. Brak pliku N+1 nie znaczy, że nie ma N+2.
-    for (const blob of journals) {
-      const revision = revisionFromPath(String(blob.pathname));
-      if (newest === null || revision > newest) continue;
-      try {
-        const opened = await openJournalBlob(blob);
-        const step = journalStep({ isNewest: revision === newest, ...opened });
-        if (step.action === "use") {
-          const doc = toPublicDoc(step.value);
-          publicCache = { at: Date.now(), data: doc };
-          return doc;
-        }
-        if (step.action === "stop") {
-          throwIfUncertain(step.error);
-          throw new Error(STORE_OUTAGE);
-        }
-      } catch (error) {
-        if (publicJournalFailure(revision === newest, error) === "stop") {
-          throwIfUncertain(error);
-          throw new Error(STORE_OUTAGE);
-        }
-      }
-    }
-    if (journals.length > 0) throw new Error("Aktywna treść jest uszkodzona.");
-    const pubs = (await blobList(PUBLIC_DOCS))
-      .filter((blob) => blob.pathname && readUrl(blob))
-      .sort((a, b) => blobStamp(b) - blobStamp(a) || String(b.pathname).localeCompare(String(a.pathname)));
-    const fromPublic = await readAny(pubs);
-    if (fromPublic.doc) {
-      const doc = toPublicDoc(fromPublic.doc);
-      publicCache = { at: Date.now(), data: doc };
-      return doc;
-    }
-    let legacy: SiteEdits | null = null;
-    try {
-      legacy = await loadLegacy();
-    } catch (error) {
-      if (readFailureAction(error) === "stop") throw error instanceof Error ? error : new Error(STORE_OUTAGE);
-      if (journals.length || fromPublic.saw) throw new Error("Aktywna treść jest uszkodzona.");
-      throw error;
-    }
-    if (!legacy && (journals.length || fromPublic.saw)) throw new Error("Aktywna treść jest uszkodzona.");
-    const doc = toPublicDoc(legacy ?? empty());
-    publicCache = { at: Date.now(), data: doc };
-    return doc;
   } catch (error) {
     if (publicCache) return publicCache.data;
     throw error;
@@ -833,8 +780,6 @@ async function writeEdits(doc: SiteEdits, afterPrivate?: (written: SiteEdits) =>
     privateUrl = (await blobPut(privatePath, sealJson(privateStamp.text), "application/json")).url;
     const check = await fetchFreshDoc(privateUrl, next.revision, privateStamp.sha);
     if (afterPrivate) await afterPrivate(check);
-    publicUrl = (await blobPut(publicPath, publicStamp.text, "application/json", 31_536_000)).url;
-    await fetchFreshDoc(publicUrl, next.revision, publicStamp.sha);
     const privatePointer = { revision: next.revision, url: privateUrl, sha: privateStamp.sha };
     const privateJournal = await blobPut(
       `${JOURNAL_PRIVATE}${padRevision(next.revision)}.json`,
@@ -842,30 +787,53 @@ async function writeEdits(doc: SiteEdits, afterPrivate?: (written: SiteEdits) =>
       "application/json",
     );
     await confirmPointer(privateJournal.url, privatePointer, true);
-    const publicPointer = { revision: next.revision, url: publicUrl, sha: publicStamp.sha };
-    const publishedState = await writePublicJournal(next.revision, publicPointer);
-    if (publishedState === "FAILED") {
+    let commitUrl = "";
+    const publicJournalPath = `${JOURNAL_PUBLIC}${padRevision(next.revision)}.json`;
+    try {
+      const commit = await blobPut(
+        `${JOURNAL_COMMIT}${padRevision(next.revision)}.json`,
+        JSON.stringify({ revision: next.revision, sha: privateStamp.sha, publicSha: publicStamp.sha }),
+        "application/json",
+      );
+      commitUrl = commit.url;
+      const commitRow = (await fetchFreshJson(commit.url)) as { revision?: unknown; sha?: unknown; publicSha?: unknown };
+      if (commitRow.revision !== next.revision || commitRow.sha !== privateStamp.sha || commitRow.publicSha !== publicStamp.sha) {
+        throw new Error("Kopia jest uszkodzona.");
+      }
+    } catch (error) {
       try {
-        await blobDelete([privateJournal.url]);
+        await blobDelete([privateJournal.url, commitUrl].filter((url) => url));
       } catch {
         throw new Error(UNCERTAIN_SAVE);
       }
-      throw new Error("Zapis nie powiódł się (500). Publikacja nie została wykonana.");
-    }
-    if (publishedState !== "COMMITTED") throw new Error(UNCERTAIN_SAVE);
-    const commit = await blobPut(
-      `${JOURNAL_COMMIT}${padRevision(next.revision)}.json`,
-      JSON.stringify({ revision: next.revision, sha: privateStamp.sha, publicSha: publicStamp.sha }),
-      "application/json",
-    );
-    let commitRow: { revision?: unknown; sha?: unknown; publicSha?: unknown };
-    try {
-      commitRow = (await fetchFreshJson(commit.url)) as { revision?: unknown; sha?: unknown; publicSha?: unknown };
-    } catch {
+      const message = error instanceof Error ? error.message : "";
+      if (message === "Kopia jest uszkodzona.") throw error;
+      if (/Zapis nie powiódł się/.test(message)) {
+        throw new Error("Zapis nie powiódł się (500). Publikacja nie została wykonana.");
+      }
       throw new Error(UNCERTAIN_SAVE);
     }
-    if (commitRow.revision !== next.revision || commitRow.sha !== privateStamp.sha || commitRow.publicSha !== publicStamp.sha) {
-      throw new Error("Kopia jest uszkodzona.");
+    try {
+      publicUrl = (await blobPut(publicPath, publicStamp.text, "application/json", 31_536_000)).url;
+      await fetchFreshDoc(publicUrl, next.revision, publicStamp.sha);
+      const publicPointer = { revision: next.revision, url: publicUrl, sha: publicStamp.sha };
+      const publishedState = await writePublicJournal(next.revision, publicPointer);
+      if (publishedState === "FAILED") throw new Error("Zapis nie powiódł się (500). Publikacja nie została wykonana.");
+      if (publishedState !== "COMMITTED") throw new Error(UNCERTAIN_SAVE);
+    } catch (error) {
+      let journalUrl = "";
+      try {
+        const head = await blobHead(publicJournalPath);
+        journalUrl = head ? readUrl(head) : "";
+      } catch {
+        throw new Error(UNCERTAIN_SAVE);
+      }
+      try {
+        await blobDelete([commitUrl, publicUrl, journalUrl, privateJournal.url].filter((url) => url));
+      } catch {
+        throw new Error(UNCERTAIN_SAVE);
+      }
+      throw error;
     }
     try {
       await writePublicPointer(next.revision, publicUrl, publicStamp.sha);
@@ -1080,14 +1048,57 @@ async function healPublic() {
   } catch {
     return;
   }
+  if (!commit) return;
+  let journalUrl = "";
+  let journalSha = "";
   let publicRevision: number | null = null;
   try {
-    publicRevision = (await readPointer(JOURNAL_PUBLIC))?.revision ?? null;
+    const journals = (await blobList(JOURNAL_PUBLIC)).filter(
+      (blob) => blob.pathname && isNumberedJournal(blob.pathname) && readUrl(blob),
+    );
+    const numbers = journals.map((blob) => revisionFromPath(String(blob.pathname)));
+    const newest = selectPublicRevision(numbers);
+    if (newest != null && newest > commit.revision) return;
+    const match = journals.find((blob) => revisionFromPath(String(blob.pathname)) === commit.revision);
+    if (match) {
+      const opened = await openJournalBlob(match);
+      if (
+        opened.doc &&
+        opened.error == null &&
+        opened.journalRevision === commit.revision &&
+        opened.docSha === commit.publicSha &&
+        typeof opened.pointerUrl === "string"
+      ) {
+        publicRevision = commit.revision;
+        journalUrl = opened.pointerUrl;
+        journalSha = opened.docSha;
+      }
+    }
   } catch {
     return;
   }
-  if (!healMayPublish({ commitRevision: commit?.revision ?? null, publicRevision })) return;
-  if (!commit) return;
+  if (journalUrl) {
+    const pointerUrl = publicBlobUrl(PUBLIC_CURRENT);
+    if (!pointerUrl) return;
+    try {
+      const got = await fetchStore(pointerUrl);
+      if (got.status === 200) {
+        let row: { revision?: unknown; url?: unknown; sha?: unknown; committed?: unknown } | null = null;
+        try {
+          row = JSON.parse(got.body) as { revision?: unknown; url?: unknown; sha?: unknown; committed?: unknown };
+        } catch {
+          row = null;
+        }
+        if (acceptPublicPointer(row) && row?.revision === commit.revision && row.sha === commit.publicSha) return;
+        if (acceptPublicPointer(row) && typeof row?.revision === "number" && row.revision > commit.revision) return;
+      } else if (got.status !== 404) return;
+    } catch {
+      return;
+    }
+    await writePublicPointer(commit.revision, journalUrl, journalSha);
+    return;
+  }
+  if (!healMayPublish({ commitRevision: commit.revision, publicRevision })) return;
   let priv: { revision: number; url: string; sha: string } | null = null;
   try {
     priv = await readPointer(JOURNAL_PRIVATE);
@@ -1104,13 +1115,14 @@ async function healPublic() {
   const published = toPublicDoc(parseDoc(doc));
   const stamp = stamped(published);
   if (stamp.sha !== commit.publicSha) return;
-  const saved = await blobPut(`${PUBLIC_DOCS}heal-${Date.now()}.json`, stamp.text, "application/json");
+  const saved = await blobPut(`${PUBLIC_DOCS}heal-${Date.now()}.json`, stamp.text, "application/json", 31_536_000);
   await fetchFreshDoc(saved.url, commit.revision, commit.publicSha);
-  await blobPut(
+  const journal = await blobPut(
     `${JOURNAL_PUBLIC}${padRevision(commit.revision)}.json`,
     JSON.stringify({ revision: commit.revision, url: saved.url, sha: stamp.sha }),
     "application/json",
   );
+  await confirmPointer(journal.url, { revision: commit.revision, url: saved.url, sha: stamp.sha }, false);
   await writePublicPointer(commit.revision, saved.url, stamp.sha);
   await writePrivatePointer(commit.revision, priv.url, priv.sha);
   publicCache = { at: Date.now(), data: published };
@@ -1131,6 +1143,138 @@ async function expandSealedImages(doc: SiteEdits) {
   return { ...doc, entries };
 }
 
+function draftInPublic(doc: SiteEdits) {
+  return doc.entries.some((entry) => entry.status !== "published") || Object.values(doc.images).some((value) => value.startsWith("seal:"));
+}
+
+async function collectCutover(): Promise<CutoverPlan> {
+  const stop = (reason: string): CutoverPlan => ({ action: "stop", reason, revision: 0, url: "", sha: "" });
+  const pointerUrl = publicBlobUrl(PUBLIC_CURRENT);
+  if (!pointerUrl) return stop("Brak magazynu. Migracja nie ruszyła.");
+  let pointerStatus: number | null = null;
+  let pointer: { revision?: unknown; url?: unknown; sha?: unknown; committed?: unknown } | null = null;
+  let pointerDocMatches = false;
+  try {
+    const got = await fetchStore(pointerUrl);
+    pointerStatus = got.status;
+    if (got.status === 200) {
+      try {
+        pointer = JSON.parse(got.body) as { revision?: unknown; url?: unknown; sha?: unknown; committed?: unknown };
+      } catch {
+        pointer = null;
+      }
+      const row = pointer;
+      if (row && acceptPublicPointer(row) && typeof row.url === "string" && typeof row.sha === "string") {
+        try {
+          const doc = await fetchCdnDoc(row.url);
+          pointerDocMatches = doc.revision === row.revision && payloadSha(canonicalEdits(doc)) === row.sha && !draftInPublic(doc);
+        } catch {
+          pointerDocMatches = false;
+        }
+      }
+    }
+  } catch {
+    return stop("Magazyn nie odpowiedział. Nic nie zostało uznane za puste.");
+  }
+  if (pointerStatus === 200) {
+    return cutoverDecision({
+      storeAnswered: true,
+      pointerStatus,
+      pointer,
+      pointerDocMatches,
+      historyAnswered: false,
+      commitUnreadable: false,
+      commits: null,
+      journals: null,
+    });
+  }
+  if (pointerStatus !== 404) {
+    return cutoverDecision({
+      storeAnswered: true,
+      pointerStatus,
+      pointer: null,
+      pointerDocMatches: false,
+      historyAnswered: false,
+      commitUnreadable: false,
+      commits: null,
+      journals: null,
+    });
+  }
+  let commits: { revision: number; publicSha: string }[] | null = null;
+  let commitUnreadable = false;
+  let journals: { revision: number; url: string; sha: string; docMatches: boolean; draft: boolean }[] | null = null;
+  try {
+    const commitBlobs = (await blobList(JOURNAL_COMMIT)).filter(
+      (blob) => blob.pathname && isNumberedJournal(blob.pathname) && readUrl(blob),
+    );
+    const newestCommit = highestRevision(commitBlobs);
+    if (!newestCommit) commits = [];
+    else {
+      const raw = (await fetchJson(readUrl(newestCommit))) as { revision?: unknown; publicSha?: unknown };
+      const revision = revisionFromPath(String(newestCommit.pathname));
+      if (typeof raw.revision !== "number" || raw.revision !== revision || typeof raw.publicSha !== "string") {
+        commitUnreadable = true;
+        commits = [];
+      } else commits = [{ revision, publicSha: raw.publicSha }];
+    }
+    const journalBlobs = (await blobList(JOURNAL_PUBLIC)).filter(
+      (blob) => blob.pathname && isNumberedJournal(blob.pathname) && readUrl(blob),
+    );
+    const ranked = [...journalBlobs].sort(
+      (left, right) => revisionFromPath(String(right.pathname)) - revisionFromPath(String(left.pathname)),
+    );
+    const head = ranked[0];
+    if (!head) journals = [];
+    else {
+      const opened = await openJournalBlob(head);
+      const url = typeof opened.pointerUrl === "string" ? opened.pointerUrl : "";
+      journals = [
+        {
+          revision: opened.journalRevision,
+          url,
+          sha: typeof opened.pointerSha === "string" ? opened.pointerSha : "",
+          docMatches: Boolean(opened.doc && opened.docSha === opened.pointerSha && opened.doc.revision === opened.journalRevision),
+          draft: Boolean(opened.doc && draftInPublic(opened.doc)),
+        },
+      ];
+    }
+  } catch {
+    return stop("Historii nie da się potwierdzić. Migracja nie ruszyła.");
+  }
+  return cutoverDecision({
+    storeAnswered: true,
+    pointerStatus: 404,
+    pointer: null,
+    pointerDocMatches: false,
+    historyAnswered: true,
+    commitUnreadable,
+    commits,
+    journals,
+  });
+}
+
+/** Tylko odczyt. Nie tworzy wskaźnika i nie kasuje danych. */
+export async function diagnosePublicCutover(): Promise<CutoverPlan> {
+  if (cutoverLatch?.action === "stop") return cutoverLatch;
+  const plan = await collectCutover();
+  if (plan.action === "stop" && plan.reason !== "Brak zatwierdzonego dziennika. Wskaźnik nie został utworzony.") cutoverLatch = plan;
+  return plan;
+}
+
+/** Zapis wskaźnika wyłącznie po gotowym planie i jawnym potwierdzeniu. Nie rusza szkiców ani zdjęć. */
+export async function applyPublicCutover(confirm: boolean): Promise<CutoverPlan> {
+  const plan = await diagnosePublicCutover();
+  if (!confirm || plan.action !== "ready") return plan;
+  await writePublicPointer(plan.revision, plan.url, plan.sha);
+  cutoverLatch = null;
+  const check = await collectCutover();
+  if (check.action !== "already" || check.revision !== plan.revision || check.sha !== plan.sha) {
+    throw new Error(UNCERTAIN_SAVE);
+  }
+  publicCache = null;
+  return check;
+}
+
 export async function readEditorDoc() {
   try {
     const pub = publicBlobUrl(PUBLIC_CURRENT);
@@ -1139,14 +1283,13 @@ export async function readEditorDoc() {
     if (pub && priv) {
       const [a, b] = await Promise.all([fetchStore(pub), fetchStore(priv)]);
       if (a.status === 200 && b.status === 200) {
-        const left = JSON.parse(a.body) as { revision?: unknown };
+        const left = JSON.parse(a.body) as { revision?: unknown; url?: unknown; sha?: unknown; committed?: unknown };
         const right = openJson(JSON.parse(b.body)) as { revision?: unknown } | null;
         aligned =
-          typeof left.revision === "number" &&
+          acceptPublicPointer(left) &&
           !!right &&
           typeof right.revision === "number" &&
-          left.revision === right.revision &&
-          left.revision > 0;
+          left.revision === right.revision;
       }
     }
     if (!aligned) await healPublic();

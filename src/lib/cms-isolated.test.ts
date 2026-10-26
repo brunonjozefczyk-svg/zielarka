@@ -34,6 +34,7 @@ DRAFT_PNG[DRAFT_PNG.length - 1] ^= 0xff;
 
 const TEST_TOKEN = "vercel_blob_rw_itest0001_notprodkey1";
 const HOST = "https://itest.public.blob.vercel-storage.com/p/";
+const PUBLIC_ORIGIN = "https://itest0001.public.blob.vercel-storage.com/";
 
 type Row = { body: Buffer; uploadedAt: number };
 
@@ -62,14 +63,15 @@ test("izolowany CMS: edytor, kopia, utrata magazynu i koszt listy", async () => 
   }
 
   function pathnameFromUrl(value: string) {
-    if (!value.startsWith(HOST)) return "";
-    return decodeURIComponent(value.slice(HOST.length));
+    if (value.startsWith(HOST)) return decodeURIComponent(value.slice(HOST.length));
+    if (value.startsWith(PUBLIC_ORIGIN)) return decodeURIComponent(value.slice(PUBLIC_ORIGIN.length));
+    return "";
   }
 
   globalThis.fetch = async (input, init) => {
     const raw = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
     const method = (init?.method || "GET").toUpperCase();
-    if (!raw.startsWith("https://vercel.com/api/blob") && !raw.startsWith(HOST)) {
+    if (!raw.startsWith("https://vercel.com/api/blob") && !raw.startsWith(HOST) && !raw.startsWith(PUBLIC_ORIGIN)) {
       throw new Error(`Izolowany test odmówił sieci: ${raw}`);
     }
     const auth = new Headers(init?.headers).get("authorization") || "";
@@ -80,7 +82,7 @@ test("izolowany CMS: edytor, kopia, utrata magazynu i koszt listy", async () => 
       calls.push(`503 ${raw}`);
       return new Response("niedostępne", { status: 503 });
     }
-    if (raw.startsWith(HOST)) {
+    if (raw.startsWith(HOST) || raw.startsWith(PUBLIC_ORIGIN)) {
       calls.push(`GET ${pathnameFromUrl(raw)}`);
       const row = files.get(pathnameFromUrl(raw));
       if (!row) return new Response("brak", { status: 404 });
@@ -344,22 +346,54 @@ test("izolowany CMS: edytor, kopia, utrata magazynu i koszt listy", async () => 
         body: Buffer.from(JSON.stringify({ revision: count, url: docUrl, sha })),
         uploadedAt: count + 1,
       });
+      files.set("zielarka/journal/public/current.json", {
+        body: Buffer.from(JSON.stringify({ revision: count, url: docUrl, sha, committed: true })),
+        uploadedAt: count + 2,
+      });
+      files.set(`zielarka/journal/public/${String(count + 5).padStart(8, "0")}.json`, {
+        body: Buffer.from(JSON.stringify({ revision: count + 5, url: docUrl, sha: "0".repeat(64) })),
+        uploadedAt: count + 3,
+      });
       const before = calls.length;
       const started = performance.now();
       resetPublicCacheForTests();
       const cold = await readPublicEdits();
       const ms = performance.now() - started;
       assert.equal(cold.revision, count);
+      assert.notEqual(cold.revision, count + 5);
       const used = calls.slice(before);
-      const listCalls = used.filter((item) => item.startsWith("LIST zielarka/journal/public/")).length;
+      const listCalls = used.filter((item) => item.startsWith("LIST ")).length;
       const bodyCalls = used.filter((item) => item.startsWith("GET ")).length;
-      assert.equal(listCalls, Math.ceil(count / 1000));
+      assert.equal(listCalls, 0);
       assert.equal(bodyCalls, 2);
       const warmBefore = calls.length;
       await readPublicEdits();
       assert.equal(calls.length, warmBefore);
       timings.push({ saves: count, listCalls, bodyCalls, ms: Math.round(ms * 10) / 10 });
     }
+    files.clear();
+    resetPublicCacheForTests();
+    const legacyDoc = {
+      revision: 2,
+      copy: { "home.note": "stary-dziennik" },
+      images: {},
+      herbs: {},
+      entries: [],
+      theme: null,
+      styles: {},
+    };
+    const legacyBody = canonicalEdits(legacyDoc);
+    const legacySha = payloadSha(legacyBody);
+    const legacyText = JSON.stringify({ ...JSON.parse(legacyBody), sha: legacySha });
+    files.set("zielarka/public/legacy.json", { body: Buffer.from(legacyText), uploadedAt: 1 });
+    const legacyUrl = urlFor("zielarka/public/legacy.json");
+    files.set("zielarka/journal/public/00000002.json", {
+      body: Buffer.from(JSON.stringify({ revision: 2, url: legacyUrl, sha: legacySha })),
+      uploadedAt: 2,
+    });
+    const legacyRead = await readPublicEdits();
+    assert.equal(legacyRead.copy["home.note"], "stary-dziennik");
+    assert.equal(legacyRead.revision, 2);
     writeFileSync("/tmp/zielarka-perf.json", JSON.stringify(timings));
   } finally {
     restoreEnv();

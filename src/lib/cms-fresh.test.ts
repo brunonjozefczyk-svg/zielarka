@@ -23,6 +23,7 @@ import {
 
 const TOKEN = "vercel_blob_rw_itest0001_notprodkey1";
 const HOST = "https://itest.public.blob.vercel-storage.com/p/";
+const PUBLIC_ORIGIN = "https://itest0001.public.blob.vercel-storage.com/";
 
 type Row = { body: Buffer; uploadedAt: number };
 
@@ -48,6 +49,7 @@ test("świeży Blob: 404, zła suma, przerwana publikacja i odtworzenie", async 
   const readablePrivate = new Set<string>();
   let flipPrivateSha = false;
   let flipServes = 0;
+  let blockPublic = 0;
   let laterJournalMisses = 0;
   const seenJournal = new Set<string>();
   const original = globalThis.fetch;
@@ -57,14 +59,15 @@ test("świeży Blob: 404, zła suma, przerwana publikacja i odtworzenie", async 
     return `${HOST}${encodeURIComponent(pathname)}`;
   }
   function pathnameFromUrl(value: string) {
-    if (!value.startsWith(HOST)) return "";
-    return decodeURIComponent(value.slice(HOST.length));
+    if (value.startsWith(HOST)) return decodeURIComponent(value.slice(HOST.length));
+    if (value.startsWith(PUBLIC_ORIGIN)) return decodeURIComponent(value.slice(PUBLIC_ORIGIN.length));
+    return "";
   }
 
   globalThis.fetch = async (input, init) => {
     const raw = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
     const method = (init?.method || "GET").toUpperCase();
-    if (!raw.startsWith("https://vercel.com/api/blob") && !raw.startsWith(HOST)) {
+    if (!raw.startsWith("https://vercel.com/api/blob") && !raw.startsWith(HOST) && !raw.startsWith(PUBLIC_ORIGIN)) {
       throw new Error(`Test odmówił sieci: ${raw}`);
     }
     if (outage && method === "GET") return new Response("niedostępne", { status: 503 });
@@ -74,9 +77,13 @@ test("świeży Blob: 404, zła suma, przerwana publikacja i odtworzenie", async 
       calls.push(`FAULT ${current.status} ${current.includes}`);
       return new Response("injected", { status: current.status });
     }
-    if (raw.startsWith(HOST)) {
+    if (raw.startsWith(HOST) || raw.startsWith(PUBLIC_ORIGIN)) {
       const pathname = pathnameFromUrl(raw);
       calls.push(`GET ${pathname}`);
+      if (blockPublic && pathname === "zielarka/journal/public/current.json") {
+        calls.push(`CDN ${blockPublic}`);
+        return new Response("limit", { status: blockPublic });
+      }
       if (pathname.startsWith("zielarka/private/") && !pathname.includes("/journal/")) {
         if (alwaysMissPrivate && !readablePrivate.has(pathname)) {
           calls.push(`GET404 ${pathname}`);
@@ -187,10 +194,38 @@ test("świeży Blob: 404, zła suma, przerwana publikacja i odtworzenie", async 
     resetPublicCacheForTests();
     assert.equal((await readPublicEdits()).copy["home.note"], "mieta");
     const coldGets = calls.filter((item) => item.startsWith("GET ")).length;
+    const beforeSteady = calls.length;
     resetPublicCacheForTests();
     await readPublicEdits();
+    const steady = calls.slice(beforeSteady);
+    assert.equal(
+      steady.filter((item) => item.startsWith("LIST")).length,
+      0,
+      "odczyt strony nie listuje dziennika",
+    );
     const added = calls.filter((item) => item.startsWith("GET ")).length - coldGets;
     assert.equal(added, 2, "zwykły odczyt nie ponawia");
+    files.set("zielarka/journal/public/00000099.json", {
+      body: Buffer.from(JSON.stringify({ revision: 99, url: "https://evil.example/doc", sha: "ab".repeat(32) })),
+      uploadedAt: 99_999,
+    });
+    resetPublicCacheForTests();
+    const ignored = await readPublicEdits();
+    assert.equal(ignored.copy["home.note"], "mieta");
+    assert.notEqual(ignored.revision, 99);
+    for (const status of [403, 429, 500, 503]) {
+      blockPublic = status;
+      resetPublicCacheForTests();
+      const beforeBlock = calls.length;
+      await assert.rejects(() => readPublicEdits(), /403|429|500|503|chwilowo niedostępny/);
+      assert.equal(
+        calls.slice(beforeBlock).some((item) => item.startsWith("LIST")),
+        false,
+        `status ${status} nie uruchamia listy`,
+      );
+    }
+    blockPublic = 0;
+    resetPublicCacheForTests();
 
     const beforeRepeat = calls.length;
     alwaysMissPrivate = true;

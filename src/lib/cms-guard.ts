@@ -169,16 +169,14 @@ export function journalStep<T>(input: {
 }
 
 /**
- * Koszt odczytu publicznego po 30 s pamięci. Kolejność listy Blob nie jest gwarantowana,
- * więc najwyższy numer wymaga pełnej listy. Suma i rewizja są w już pobranym dzienniku i dokumencie.
- * 100 i 1000 zapisów: 1 lista. 10 000 zapisów: 10 list. Do tego 2 odczyty treści.
+ * Koszt zimnego odczytu publicznego, gdy wskaźnik zatwierdzonej wersji już jest.
+ * Historia dziennika nie jest listowana. Dwa odczyty to wskaźnik i dokument.
+ * Trafienie CDN Blob nie liczy się nawet jako operacja prosta. Pamięć instancji nie zastępuje wskaźnika.
  */
-export function publicReadCost(saves: number, pageSize = 1000): { listRequests: number; documentRequests: number } {
-  if (!Number.isInteger(saves) || saves < 0 || !Number.isInteger(pageSize) || pageSize < 1) {
-    return { listRequests: 0, documentRequests: 0 };
-  }
+export function publicReadCost(saves: number, _pageSize = 1000): { listRequests: number; documentRequests: number } {
+  if (!Number.isInteger(saves) || saves < 0) return { listRequests: 0, documentRequests: 0 };
   if (saves === 0) return { listRequests: 0, documentRequests: 0 };
-  return { listRequests: Math.ceil(saves / pageSize), documentRequests: 2 };
+  return { listRequests: 0, documentRequests: 2 };
 }
 
 export const STORE_OUTAGE = "Magazyn treści jest chwilowo niedostępny. Zapis został zatrzymany. Nic nie zostało cofnięte.";

@@ -37,7 +37,7 @@ export const Route = createRootRoute({
     ],
   }),
   headers: () => ({
-    "Cache-Control": "public, max-age=0, s-maxage=30, stale-while-revalidate=120",
+    "Cache-Control": "public, max-age=0, s-maxage=120, stale-while-revalidate=60",
     "X-Content-Type-Options": "nosniff",
     "Referrer-Policy": "strict-origin-when-cross-origin",
     "X-Frame-Options": "SAMEORIGIN",

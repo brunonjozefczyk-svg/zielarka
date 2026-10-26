@@ -571,10 +571,10 @@ test("dziennik 12 nie może wskazywać dokumentu 10 ani złej sumy", () => {
   });
   assert.equal(noKey.action, "stop");
   assert.equal(writeAfterReread(noKey.action === "stop" ? noKey.error : null, null, 12), "stop");
-  assert.deepEqual(publicReadCost(100), { listRequests: 1, documentRequests: 2 });
-  assert.deepEqual(publicReadCost(1000), { listRequests: 1, documentRequests: 2 });
-  assert.deepEqual(publicReadCost(10_000), { listRequests: 10, documentRequests: 2 });
-  assert.deepEqual(publicReadCost(1001), { listRequests: 2, documentRequests: 2 });
+  assert.deepEqual(publicReadCost(100), { listRequests: 0, documentRequests: 2 });
+  assert.deepEqual(publicReadCost(1000), { listRequests: 0, documentRequests: 2 });
+  assert.deepEqual(publicReadCost(10_000), { listRequests: 0, documentRequests: 2 });
+  assert.deepEqual(publicReadCost(1001), { listRequests: 0, documentRequests: 2 });
   assert.deepEqual(publicReadCost(0), { listRequests: 0, documentRequests: 0 });
 });
 

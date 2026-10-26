@@ -672,6 +672,95 @@ export function herbOutageAction(isBuiltin: boolean): "show-builtin" | "unavaila
   return isBuiltin ? "show-builtin" : "unavailable";
 }
 
+/**
+ * Awaria magazynu nie jest 404 i nie jest pustą bazą.
+ * Potwierdzony odczyt bez karty to 404. Potwierdzony odczyt z kartą to 200.
+ */
+export function articleStatus(input: { storeOk: boolean; found: boolean }): 200 | 404 | 503 {
+  if (!input.storeOk) return 503;
+  return input.found ? 200 : 404;
+}
+
+export function documentHeaders(storeOk: boolean): Record<string, string> {
+  const security = {
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "strict-origin-when-cross-origin",
+    "X-Frame-Options": "SAMEORIGIN",
+    "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
+  };
+  if (storeOk) {
+    return { ...security, "Cache-Control": "public, max-age=0, s-maxage=120" };
+  }
+  return {
+    ...security,
+    "Cache-Control": "no-store",
+    "X-Robots-Tag": "noindex, nofollow",
+    "X-Zielarka-Store": "down",
+  };
+}
+
+/** Zamienia odpowiedź z nagłówkiem awarii na 503 bez tego nagłówka. Nie rusza przekierowań. */
+export function promoteStoreOutage(status: number, headers: Headers): { status: number; headers: Headers } | null {
+  if (headers.get("x-zielarka-store") !== "down") return null;
+  const next = new Headers(headers);
+  next.delete("x-zielarka-store");
+  next.set("cache-control", "no-store");
+  next.set("x-robots-tag", "noindex, nofollow");
+  if (status >= 300 && status < 400) return { status, headers: next };
+  return { status: 503, headers: next };
+}
+
+export type DraftExposureFile = {
+  pathname: string;
+  sealed: boolean;
+  hasDraft: boolean;
+  draftImage: boolean;
+};
+
+/**
+ * Plan tylko do odczytu. Nie kasuje plików.
+ * Publiczny JSON ze szkicem zostaje do czasu pełnej kopii i sprawdzenia zdjęć.
+ * Zaszyfrowana kopia nie jest publicznym wyciekiem.
+ */
+export function draftExposurePlan(files: readonly DraftExposureFile[], backupOk: boolean) {
+  let publicDraftFiles = 0;
+  let sealedDraftFiles = 0;
+  let draftImages = 0;
+  for (const file of files) {
+    const exposed =
+      file.pathname === "zielarka/content.json" ||
+      file.pathname.startsWith("zielarka/docs/") ||
+      file.pathname.startsWith("zielarka/public/");
+    if (file.sealed) {
+      if (file.hasDraft || file.draftImage) sealedDraftFiles += 1;
+      continue;
+    }
+    if (exposed && (file.hasDraft || file.draftImage)) publicDraftFiles += 1;
+    if (file.draftImage && (exposed || file.pathname.startsWith("zielarka/images/"))) draftImages += 1;
+  }
+  const base = { run: false as const, publicDraftFiles, sealedDraftFiles, draftImages };
+  if (!backupOk) {
+    return {
+      ...base,
+      ready: false,
+      reason: "Najpierw pełna kopia poza magazynem. Starych plików nie ruszamy.",
+    };
+  }
+  if (publicDraftFiles === 0 && draftImages === 0) {
+    return {
+      ...base,
+      ready: true,
+      reason: "Nie widać publicznego szkicu. Nic nie kasujemy.",
+    };
+  }
+  return {
+    ...base,
+    ready: true,
+    reason:
+      "Po otwarciu kopii można zdjąć publiczny odczyt starych plików. Zaszyfrowana kopia zostaje. Najpierw potwierdź, że zdjęcia szkiców są w kopii.",
+  };
+}
+
 export function canonicalEdits(doc: {
   revision: number;
   copy: unknown;

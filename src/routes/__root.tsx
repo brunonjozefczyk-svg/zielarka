@@ -3,6 +3,7 @@ import { createRootRoute, HeadContent, Outlet, Scripts } from "@tanstack/react-r
 import { AuthProvider } from "@/lib/auth/provider";
 import { PreviewHostBridge } from "@/components/preview-host-bridge";
 import { EditsProvider, type PublicEdits } from "@/lib/edits-context";
+import { documentHeaders } from "@/lib/cms-guard";
 import { themeAttrs, themeVars } from "@/lib/theme";
 import { Toaster } from "sonner";
 import appCss from "../styles.css?url";
@@ -13,22 +14,17 @@ const DESCRIPTION =
 
 export const Route = createRootRoute({
   loader: async (): Promise<{ edits: PublicEdits }> => {
-    try {
-      const { loadSiteEdits } = await import("@/lib/site-api");
-      return { edits: await loadSiteEdits() };
-    } catch {
-      return {
-        edits: { revision: 0, copy: {}, images: {}, herbs: {}, entries: [], theme: null, styles: {}, storeOk: false },
-      };
-    }
+    const { loadSiteEdits } = await import("@/lib/site-api");
+    return { edits: await loadSiteEdits() };
   },
-  head: () => ({
+  head: ({ loaderData }) => ({
     meta: [
       { charSet: "utf-8" },
       { name: "viewport", content: "width=device-width, initial-scale=1" },
       { title: APP_NAME },
       { name: "description", content: DESCRIPTION },
       { name: "theme-color", content: "#2A4A38" },
+      ...(loaderData?.edits.storeOk === false ? [{ name: "robots", content: "noindex, nofollow" }] : []),
     ],
     links: [
       { rel: "icon", type: "image/png", href: "/favicon.png" },
@@ -37,13 +33,7 @@ export const Route = createRootRoute({
       { rel: "apple-touch-icon", href: "/apple-touch-icon.png" },
     ],
   }),
-  headers: () => ({
-    "Cache-Control": "public, max-age=0, s-maxage=120",
-    "X-Content-Type-Options": "nosniff",
-    "Referrer-Policy": "strict-origin-when-cross-origin",
-    "X-Frame-Options": "SAMEORIGIN",
-    "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
-  }),
+  headers: ({ loaderData }) => documentHeaders(loaderData != null && loaderData.edits.storeOk !== false),
   component: function Root() {
     const { edits } = Route.useLoaderData();
     return (

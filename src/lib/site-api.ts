@@ -1,5 +1,4 @@
 import { createServerFn } from "@tanstack/react-start";
-import { herbOutageAction } from "./cms-guard";
 import { SERVER_PAYLOAD_LIMIT } from "./backup-wire";
 import type { ManagedEntry } from "./entries";
 import type { HerbCopy } from "./herb-editor";
@@ -33,16 +32,30 @@ async function gate(password: string) {
 
 export const loadSiteEdits = createServerFn({ method: "GET" }).handler(async () => {
   const { readPublicEdits } = await import("./site-store.server");
-  const doc = await readPublicEdits();
-  return {
-    revision: doc.revision,
-    copy: doc.copy,
-    images: doc.images,
-    herbs: doc.herbs as Record<string, HerbCopy>,
-    entries: doc.entries,
-    theme: doc.theme,
-    styles: doc.styles,
-  };
+  try {
+    const doc = await readPublicEdits();
+    return {
+      storeOk: true as const,
+      revision: doc.revision,
+      copy: doc.copy,
+      images: doc.images,
+      herbs: doc.herbs as Record<string, HerbCopy>,
+      entries: doc.entries,
+      theme: doc.theme,
+      styles: doc.styles,
+    };
+  } catch {
+    return {
+      storeOk: false as const,
+      revision: 0,
+      copy: {},
+      images: {},
+      herbs: {},
+      entries: [],
+      theme: null,
+      styles: {},
+    };
+  }
 });
 
 export const loadHerbPage = createServerFn({ method: "GET" })
@@ -55,15 +68,12 @@ export const loadHerbPage = createServerFn({ method: "GET" })
     try {
       edits = await readPublicEdits();
     } catch {
-      if (herbOutageAction(Boolean(getHerb(data.slug))) === "unavailable") {
-        throw new Error("Magazyn treści jest chwilowo niedostępny.");
-      }
       const builtin = getHerb(data.slug);
-      if (!builtin) throw new Error("Magazyn treści jest chwilowo niedostępny.");
+      if (!builtin) return { outage: true as const, herb: null, related: [] };
       const related = builtin.related
         .map((slug) => herbs.find((item) => item.slug === slug))
         .filter((item): item is NonNullable<typeof item> => Boolean(item));
-      return { herb: builtin, related };
+      return { outage: true as const, herb: builtin, related };
     }
     const builtin = getHerb(data.slug);
     let herb = builtin;

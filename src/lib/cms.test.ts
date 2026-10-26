@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import test from "node:test";
 import { listAllBlobs, newestRevisionPath, parseBlobListPage, urlsIfComplete } from "./blob-pages.ts";
-import { assertRevision, attemptBlocked, canonicalEdits, chooseFreshRead, classifyLegacy, confirmFreshBody, createAttemptLimiter, draftImageUrls, expiredInboxUrls, freshReadDecision, freshReadDelayMs, FRESH_READ_LIMIT, healMayPublish, herbOutageAction, journalStep, judgeJournal, legacyFieldLoss, lockDecision, memWrite, migrationAllowed, migrationPlan, newestCommittedRevision, nextAttempt, publicFallback, publicJournalFailure, publicReadCost, readFailureAction, restoreAllowed, sameRevisionOrUnreadable, selectPublicRevision, setFreshReadDelayScaleForTests, STORE_OUTAGE, throwIfUncertain, toPublicDoc, trustPublicPointer, unpointedPublicChoice, urlsToPrune, urlsToRetain, writeAfterReread, acceptPublicPointer, cutoverDecision } from "./cms-guard.ts";
+import { assertRevision, attemptBlocked, canonicalEdits, chooseFreshRead, classifyLegacy, confirmFreshBody, createAttemptLimiter, draftImageUrls, expiredInboxUrls, freshReadDecision, freshReadDelayMs, FRESH_READ_LIMIT, healMayPublish, herbOutageAction, journalStep, judgeJournal, legacyFieldLoss, lockDecision, memWrite, migrationAllowed, migrationPlan, newestCommittedRevision, nextAttempt, publicFallback, publicJournalFailure, publicReadCost, readFailureAction, restoreAllowed, sameRevisionOrUnreadable, selectPublicRevision, setFreshReadDelayScaleForTests, STORE_OUTAGE, throwIfUncertain, toPublicDoc, trustPublicPointer, unpointedPublicChoice, urlsToPrune, urlsToRetain, writeAfterReread, acceptPublicPointer, cutoverDecision, articleStatus, documentHeaders, promoteStoreOutage, draftExposurePlan } from "./cms-guard.ts";
 import { openJson, payloadSha, resealJson, sealJson, sealWithEditorPassword } from "./draft-seal.server.ts";
 import { normalizeEntry, plainText, slugify, uniqueSlug } from "./entries.ts";
 import { sitemapXml } from "./sitemap.ts";
@@ -120,6 +120,53 @@ test("awaria magazynu nie jest pustą bazą ani 404 karty z kodu", () => {
   assert.deepEqual(publicFallback({ revision: 4 }, new Error("x")), { revision: 4 });
   assert.equal(herbOutageAction(true), "show-builtin");
   assert.equal(herbOutageAction(false), "unavailable");
+  assert.equal(articleStatus({ storeOk: true, found: true }), 200);
+  assert.equal(articleStatus({ storeOk: true, found: false }), 404);
+  assert.equal(articleStatus({ storeOk: false, found: true }), 503);
+  assert.equal(articleStatus({ storeOk: false, found: false }), 503);
+  const healthy = documentHeaders(true);
+  assert.equal(healthy["Cache-Control"], "public, max-age=0, s-maxage=120");
+  assert.equal("X-Zielarka-Store" in healthy, false);
+  const down = new Headers(documentHeaders(false));
+  const promoted = promoteStoreOutage(200, down);
+  assert.equal(promoted?.status, 503);
+  assert.equal(promoted?.headers.get("cache-control"), "no-store");
+  assert.equal(promoted?.headers.get("x-robots-tag"), "noindex, nofollow");
+  assert.equal(promoted?.headers.get("x-zielarka-store"), null);
+  assert.equal(promoteStoreOutage(200, new Headers(documentHeaders(true))), null);
+  const redirect = promoteStoreOutage(302, new Headers(documentHeaders(false)));
+  assert.equal(redirect?.status, 302);
+  assert.equal(redirect?.headers.get("x-zielarka-store"), null);
+});
+
+test("plan starych szkiców niczego nie kasuje", () => {
+  const blocked = draftExposurePlan(
+    [{ pathname: "zielarka/docs/stary.json", sealed: false, hasDraft: true, draftImage: true }],
+    false,
+  );
+  assert.equal(blocked.run, false);
+  assert.equal(blocked.ready, false);
+  assert.equal(blocked.publicDraftFiles, 1);
+  assert.equal(blocked.draftImages, 1);
+  assert.match(blocked.reason, /nie ruszamy/);
+  const sealedOnly = draftExposurePlan(
+    [{ pathname: "zielarka/sealed/kopia.json", sealed: true, hasDraft: true, draftImage: true }],
+    true,
+  );
+  assert.equal(sealedOnly.run, false);
+  assert.equal(sealedOnly.publicDraftFiles, 0);
+  assert.equal(sealedOnly.sealedDraftFiles, 1);
+  assert.equal(sealedOnly.draftImages, 0);
+  assert.match(sealedOnly.reason, /Nie widać publicznego szkicu/);
+  const image = draftExposurePlan(
+    [{ pathname: "zielarka/images/szkic.webp", sealed: false, hasDraft: false, draftImage: true }],
+    true,
+  );
+  assert.equal(image.run, false);
+  assert.equal(image.ready, true);
+  assert.equal(image.draftImages, 1);
+  assert.match(image.reason, /zdjęcia szkiców/);
+  assert.equal(image.reason.includes("zielarka/images"), false);
 });
 
 test("szkic nie występuje w zaszyfrowanym pliku", () => {

@@ -13,10 +13,19 @@ export const Route = createFileRoute("/zielnik/$slug")({
   loader: async ({ params }) => {
     const { loadHerbPage } = await import("@/lib/site-api");
     const page = await loadHerbPage({ data: { slug: params.slug } });
-    if (!page) throw notFound();
+    if (page && "outage" in page && page.outage) return page;
+    if (!page?.herb) throw notFound();
     return page;
   },
   head: ({ loaderData }) => {
+    if (loaderData && "outage" in loaderData && loaderData.outage) {
+      return {
+        meta: [
+          { title: "Chwilowa przerwa — Zielarka.pl" },
+          { name: "robots", content: "noindex, nofollow" },
+        ],
+      };
+    }
     const herb = loaderData?.herb;
     if (!herb) return {};
     return {
@@ -45,7 +54,17 @@ function Prose({ title, text }: { title: string; text: string }) {
 }
 
 function HerbPage() {
-  const { herb: original, related } = Route.useLoaderData();
+  const data = Route.useLoaderData();
+  if (!data.herb) {
+    return (
+      <SiteShell>
+        <p className="mx-auto max-w-xl px-4 py-24 text-center text-ink">
+          Magazyn treści jest chwilowo niedostępny. To nie znaczy, że tej karty nie ma.
+        </p>
+      </SiteShell>
+    );
+  }
+  const { herb: original, related } = data;
   const herb = useMergedHerb(original);
 
   return (

@@ -76,8 +76,16 @@ export function uniqueSlug(title: string, taken: Set<string>, requested?: string
 }
 
 function imageValue(value: unknown) {
-  const raw = String(value ?? "");
+  const raw = String(value ?? "").trim();
   if (raw.startsWith("data:image/")) return raw.slice(0, 3_400_000);
+  if (
+    raw.startsWith("seal:") ||
+    raw.startsWith("https://") ||
+    raw.startsWith("http://") ||
+    raw.startsWith("/")
+  ) {
+    return raw.slice(0, 2000);
+  }
   return plainText(raw, 400);
 }
 
@@ -155,7 +163,7 @@ export function parseStoredEntry(input: unknown): ManagedEntry | null {
     seoTitle: plainText(raw.seoTitle, 70) || `${name} | Zielarka.pl`.slice(0, 70),
     seoDescription: plainText(raw.seoDescription, 160),
     alt: plainText(raw.alt, 160) || name,
-    image: plainText(raw.image, 400),
+    image: imageValue(raw.image),
     faqs: Array.isArray(raw.faqs)
       ? raw.faqs
           .slice(0, 6)

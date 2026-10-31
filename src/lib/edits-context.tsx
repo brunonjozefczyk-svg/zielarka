@@ -1,15 +1,28 @@
 import { createContext, useContext, type ReactNode } from "react";
 import type { ManagedEntry } from "./entries";
 import type { HerbCopy } from "./herb-editor";
+import type { TextStyle, ThemeSettings } from "./theme";
 
 export type PublicEdits = {
+  revision: number;
   copy: Record<string, string>;
   images: Record<string, string>;
   herbs: Record<string, HerbCopy>;
   entries: ManagedEntry[];
+  theme: ThemeSettings | null;
+  styles: Record<string, TextStyle>;
+  storeOk?: boolean;
 };
 
-const empty: PublicEdits = { copy: {}, images: {}, herbs: {}, entries: [] };
+const empty: PublicEdits = {
+  revision: 0,
+  copy: {},
+  images: {},
+  herbs: {},
+  entries: [],
+  theme: null,
+  styles: {},
+};
 
 const EditsContext = createContext<PublicEdits>(empty);
 

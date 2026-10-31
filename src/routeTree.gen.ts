@@ -15,11 +15,13 @@ import { Route as KlubRouteImport } from './routes/klub'
 import { Route as KonsultacjeRouteImport } from './routes/konsultacje'
 import { Route as KontaktRouteImport } from './routes/kontakt'
 import { Route as OMnieRouteImport } from './routes/o-mnie'
+import { Route as PolitykaPrywatnosciRouteImport } from './routes/polityka-prywatnosci'
 import { Route as SitemapDotxmlRouteImport } from './routes/sitemap[.]xml'
 import { Route as WarsztatyRouteImport } from './routes/warsztaty'
 import { Route as ZielnikRouteImport } from './routes/zielnik'
 import { Route as ZielnikIndexRouteImport } from './routes/zielnik.index'
 import { Route as ZielnikSlugRouteImport } from './routes/zielnik.$slug'
+import { Route as ApiCronBackupRouteImport } from './routes/api.cron.backup'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -51,6 +53,11 @@ const OMnieRoute = OMnieRouteImport.update({
   path: '/o-mnie',
   getParentRoute: () => rootRouteImport,
 } as any)
+const PolitykaPrywatnosciRoute = PolitykaPrywatnosciRouteImport.update({
+  id: '/polityka-prywatnosci',
+  path: '/polityka-prywatnosci',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const SitemapDotxmlRoute = SitemapDotxmlRouteImport.update({
   id: '/sitemap.xml',
   path: '/sitemap.xml',
@@ -76,6 +83,11 @@ const ZielnikSlugRoute = ZielnikSlugRouteImport.update({
   path: '/$slug',
   getParentRoute: () => ZielnikRoute,
 } as any)
+const ApiCronBackupRoute = ApiCronBackupRouteImport.update({
+  id: '/api/cron/backup',
+  path: '/api/cron/backup',
+  getParentRoute: () => rootRouteImport,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
@@ -84,11 +96,13 @@ export interface FileRoutesByFullPath {
   '/konsultacje': typeof KonsultacjeRoute
   '/kontakt': typeof KontaktRoute
   '/o-mnie': typeof OMnieRoute
+  '/polityka-prywatnosci': typeof PolitykaPrywatnosciRoute
   '/sitemap.xml': typeof SitemapDotxmlRoute
   '/warsztaty': typeof WarsztatyRoute
   '/zielnik': typeof ZielnikRouteWithChildren
   '/zielnik/$slug': typeof ZielnikSlugRoute
   '/zielnik/': typeof ZielnikIndexRoute
+  '/api/cron/backup': typeof ApiCronBackupRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -97,10 +111,12 @@ export interface FileRoutesByTo {
   '/konsultacje': typeof KonsultacjeRoute
   '/kontakt': typeof KontaktRoute
   '/o-mnie': typeof OMnieRoute
+  '/polityka-prywatnosci': typeof PolitykaPrywatnosciRoute
   '/sitemap.xml': typeof SitemapDotxmlRoute
   '/warsztaty': typeof WarsztatyRoute
   '/zielnik/$slug': typeof ZielnikSlugRoute
   '/zielnik': typeof ZielnikIndexRoute
+  '/api/cron/backup': typeof ApiCronBackupRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -110,11 +126,13 @@ export interface FileRoutesById {
   '/konsultacje': typeof KonsultacjeRoute
   '/kontakt': typeof KontaktRoute
   '/o-mnie': typeof OMnieRoute
+  '/polityka-prywatnosci': typeof PolitykaPrywatnosciRoute
   '/sitemap.xml': typeof SitemapDotxmlRoute
   '/warsztaty': typeof WarsztatyRoute
   '/zielnik': typeof ZielnikRouteWithChildren
   '/zielnik/$slug': typeof ZielnikSlugRoute
   '/zielnik/': typeof ZielnikIndexRoute
+  '/api/cron/backup': typeof ApiCronBackupRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -125,11 +143,13 @@ export interface FileRouteTypes {
     | '/konsultacje'
     | '/kontakt'
     | '/o-mnie'
+    | '/polityka-prywatnosci'
     | '/sitemap.xml'
     | '/warsztaty'
     | '/zielnik'
     | '/zielnik/$slug'
     | '/zielnik/'
+    | '/api/cron/backup'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -138,10 +158,12 @@ export interface FileRouteTypes {
     | '/konsultacje'
     | '/kontakt'
     | '/o-mnie'
+    | '/polityka-prywatnosci'
     | '/sitemap.xml'
     | '/warsztaty'
     | '/zielnik/$slug'
     | '/zielnik'
+    | '/api/cron/backup'
   id:
     | '__root__'
     | '/'
@@ -150,11 +172,13 @@ export interface FileRouteTypes {
     | '/konsultacje'
     | '/kontakt'
     | '/o-mnie'
+    | '/polityka-prywatnosci'
     | '/sitemap.xml'
     | '/warsztaty'
     | '/zielnik'
     | '/zielnik/$slug'
     | '/zielnik/'
+    | '/api/cron/backup'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -164,9 +188,11 @@ export interface RootRouteChildren {
   KonsultacjeRoute: typeof KonsultacjeRoute
   KontaktRoute: typeof KontaktRoute
   OMnieRoute: typeof OMnieRoute
+  PolitykaPrywatnosciRoute: typeof PolitykaPrywatnosciRoute
   SitemapDotxmlRoute: typeof SitemapDotxmlRoute
   WarsztatyRoute: typeof WarsztatyRoute
   ZielnikRoute: typeof ZielnikRouteWithChildren
+  ApiCronBackupRoute: typeof ApiCronBackupRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -213,6 +239,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof OMnieRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/polityka-prywatnosci': {
+      id: '/polityka-prywatnosci'
+      path: '/polityka-prywatnosci'
+      fullPath: '/polityka-prywatnosci'
+      preLoaderRoute: typeof PolitykaPrywatnosciRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/sitemap.xml': {
       id: '/sitemap.xml'
       path: '/sitemap.xml'
@@ -248,6 +281,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ZielnikSlugRouteImport
       parentRoute: typeof ZielnikRoute
     }
+    '/api/cron/backup': {
+      id: '/api/cron/backup'
+      path: '/api/cron/backup'
+      fullPath: '/api/cron/backup'
+      preLoaderRoute: typeof ApiCronBackupRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
@@ -271,19 +311,22 @@ const rootRouteChildren: RootRouteChildren = {
   KonsultacjeRoute: KonsultacjeRoute,
   KontaktRoute: KontaktRoute,
   OMnieRoute: OMnieRoute,
+  PolitykaPrywatnosciRoute: PolitykaPrywatnosciRoute,
   SitemapDotxmlRoute: SitemapDotxmlRoute,
   WarsztatyRoute: WarsztatyRoute,
   ZielnikRoute: ZielnikRouteWithChildren,
+  ApiCronBackupRoute: ApiCronBackupRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
   ._addFileTypes<FileRouteTypes>()
 
 import type { getRouter } from './router.tsx'
-import type { createStart } from '@tanstack/react-start'
+import type { startInstance } from './start.ts'
 declare module '@tanstack/react-start' {
   interface Register {
     ssr: true
     router: Awaited<ReturnType<typeof getRouter>>
+    config: Awaited<ReturnType<typeof startInstance.getOptions>>
   }
 }

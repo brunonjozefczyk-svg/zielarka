@@ -1,9 +1,26 @@
 {
+  "git": { "deploymentEnabled": { "analityka": false, "codex/analityka-review": false, "optymalizacja-szybkosc": false } },
   "headers": [
+    {
+      "source": "/(.*)",
+      "headers": [
+        { "key": "X-Content-Type-Options", "value": "nosniff" },
+        { "key": "Referrer-Policy", "value": "strict-origin-when-cross-origin" },
+        { "key": "X-Frame-Options", "value": "SAMEORIGIN" },
+        { "key": "Permissions-Policy", "value": "camera=(), microphone=(), geolocation=()" },
+        { "key": "Strict-Transport-Security", "value": "max-age=31536000" }
+      ]
+    },
     {
       "source": "/images/(.*)",
       "headers": [
         { "key": "Cache-Control", "value": "public, max-age=604800" }
+      ]
+    },
+    {
+      "source": "/fonts/(.*)",
+      "headers": [
+        { "key": "Cache-Control", "value": "public, max-age=31536000, immutable" }
       ]
     },
     {
@@ -23,6 +40,12 @@
       "source": "/webmail/(.*)",
       "destination": "https://poczta.seohost.pl/",
       "permanent": false
+    }
+  ],
+  "crons": [
+    {
+      "path": "/api/cron/backup",
+      "schedule": "15 3 * * *"
     }
   ]
 }

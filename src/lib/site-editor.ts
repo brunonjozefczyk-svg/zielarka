@@ -1,12 +1,24 @@
 import { useEffect, useState } from "react";
 import { useEdits } from "./edits-context";
 
+import type { TextStyle } from "./theme";
+
 const COPY_KEY = "zielarka.site-copy.v3";
 const MODE_KEY = "zielarka.edit-mode";
 const EVENT = "zielarka-site-editor";
 const DB_NAME = "zielarka-editor-v2";
 const STORE = "images";
 const PASS_KEY = "zielarka.editor-pass";
+
+let revision = 0;
+
+export function setEditorRevision(next: number) {
+  if (Number.isInteger(next) && next >= 0) revision = next;
+}
+
+export function editorRevision() {
+  return revision;
+}
 
 function emit() {
   window.dispatchEvent(new Event(EVENT));
@@ -35,16 +47,30 @@ export function clearEditorPassword() {
   writeEditMode(false);
 }
 
-export async function saveCopy(id: string, value: string) {
-  const all = readCopy();
-  all[id] = value;
-  localStorage.setItem(COPY_KEY, JSON.stringify(all));
+const styleNotes = new Map<string, TextStyle | null>();
+
+export function noteTextStyle(id: string, style: TextStyle | null) {
+  styleNotes.set(id, style);
   emit();
+}
+
+export function notedTextStyle(id: string): TextStyle | null | undefined {
+  return styleNotes.has(id) ? styleNotes.get(id) : undefined;
+}
+
+export async function saveCopy(id: string, value: string, style: TextStyle | null = null) {
   const password = readEditorPassword();
   if (!password) throw new Error("brak hasła");
   const { saveSiteCopyFn } = await import("./site-api");
-  const result = await saveSiteCopyFn({ data: { password, id, value } });
-  if (!result.ok) throw new Error("odmowa");
+  const result = await saveSiteCopyFn({
+    data: { password, id, value, revision: editorRevision(), style },
+  });
+  if (!result.ok) throw new Error(result.message || "odmowa");
+  setEditorRevision(result.revision);
+  const all = readCopy();
+  all[id] = value;
+  localStorage.setItem(COPY_KEY, JSON.stringify(all));
+  noteTextStyle(id, style);
 }
 
 export function getCopy(id: string, fallback: string) {
@@ -85,33 +111,32 @@ export async function getImage(id: string): Promise<string | null> {
 }
 
 export async function saveImage(id: string, dataUrl: string) {
+  const password = readEditorPassword();
+  if (!password) throw new Error("brak hasła");
+  const { saveSiteImageFn } = await import("./site-api");
+  const result = await saveSiteImageFn({
+    data: { password, id, dataUrl, revision: editorRevision() },
+  });
+  if (!result.ok) throw new Error(result.message || "odmowa");
+  setEditorRevision(result.revision);
+  if (!result.url) return;
   const db = await openDb();
   await new Promise<void>((resolve, reject) => {
-    const req = db.transaction(STORE, "readwrite").objectStore(STORE).put(dataUrl, id);
+    const req = db.transaction(STORE, "readwrite").objectStore(STORE).put(result.url, id);
     req.onsuccess = () => resolve();
     req.onerror = () => reject(req.error);
   });
   emit();
-  const password = readEditorPassword();
-  if (!password) throw new Error("brak hasła");
-  const { saveSiteImageFn } = await import("./site-api");
-  const result = await saveSiteImageFn({ data: { password, id, dataUrl } });
-  if (!result.ok) throw new Error("odmowa");
-  if (result.url) {
-    await new Promise<void>((resolve, reject) => {
-      const req = db.transaction(STORE, "readwrite").objectStore(STORE).put(result.url, id);
-      req.onsuccess = () => resolve();
-      req.onerror = () => reject(req.error);
-    });
-    emit();
-  }
+}
+
+export function adoptServerCopy(copy: Record<string, string>) {
+  if (typeof window === "undefined") return;
+  localStorage.setItem(COPY_KEY, JSON.stringify(copy));
+  emit();
 }
 
 export function applyRemoteCopy(copy: Record<string, string>) {
-  if (typeof window === "undefined") return;
-  const next = { ...readCopy(), ...copy };
-  localStorage.setItem(COPY_KEY, JSON.stringify(next));
-  emit();
+  adoptServerCopy(copy);
 }
 
 export async function applyRemoteImages(images: Record<string, string>) {
@@ -170,6 +195,10 @@ export function useCopy(id: string, fallback: string) {
   const [value, setValue] = useState(initial);
   useEffect(() => {
     const apply = () => {
+      if (!readEditMode()) {
+        setValue(remote ?? fallback);
+        return;
+      }
       const stored = readCopy();
       if (Object.prototype.hasOwnProperty.call(stored, id)) setValue(stored[id]);
       else setValue(remote ?? fallback);
@@ -188,6 +217,10 @@ export function useLiveImage(id: string, fallback: string) {
   useEffect(() => {
     let live = true;
     const apply = () => {
+      if (!readEditMode()) {
+        if (live) setSrc(remote || fallback);
+        return;
+      }
       getImage(id)
         .then((stored) => {
           if (live) setSrc(stored || remote || fallback);

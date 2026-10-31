@@ -1,8 +1,13 @@
-import { createRootRoute, HeadContent, Outlet, Scripts } from "@tanstack/react-router";
+import { useEffect, useState, type ComponentType } from "react";
+import { createRootRoute, useRouterState, HeadContent, Outlet, Scripts } from "@tanstack/react-router";
 import { AuthProvider } from "@/lib/auth/provider";
 import { PreviewHostBridge } from "@/components/preview-host-bridge";
 import { EditsProvider, type PublicEdits } from "@/lib/edits-context";
+import { documentHeaders } from "@/lib/cms-guard";
+import { themeAttrs, themeVars } from "@/lib/theme";
 import { Toaster } from "sonner";
+import { privacyPolicy } from "@/lib/privacy-policy";
+import { publicMeasurementEnabled } from "@/lib/analytics";
 import appCss from "../styles.css?url";
 
 const APP_NAME = "Zielarka.pl — zioła w codzienności";
@@ -14,31 +19,33 @@ export const Route = createRootRoute({
     const { loadSiteEdits } = await import("@/lib/site-api");
     return { edits: await loadSiteEdits() };
   },
-  head: () => ({
+  head: ({ loaderData }) => ({
     meta: [
       { charSet: "utf-8" },
       { name: "viewport", content: "width=device-width, initial-scale=1" },
       { title: APP_NAME },
       { name: "description", content: DESCRIPTION },
       { name: "theme-color", content: "#2A4A38" },
+      ...(loaderData?.edits.storeOk === false ? [{ name: "robots", content: "noindex, nofollow" }] : []),
     ],
     links: [
-      { rel: "preconnect", href: "https://fonts.googleapis.com" },
-      { rel: "preconnect", href: "https://fonts.gstatic.com", crossOrigin: "anonymous" },
       { rel: "icon", type: "image/png", href: "/favicon.png" },
       { rel: "stylesheet", href: appCss },
-      {
-        rel: "stylesheet",
-        href: "https://fonts.googleapis.com/css2?family=Figtree:ital,wght@0,400;0,500;0,600;0,700;1,400&family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,500;0,9..144,600;0,9..144,700;1,9..144,500&display=swap",
-      },
       { rel: "manifest", href: "/__grok/manifest.webmanifest" },
       { rel: "apple-touch-icon", href: "/apple-touch-icon.png" },
     ],
   }),
+  headers: ({ loaderData }) => documentHeaders(loaderData != null && loaderData.edits.storeOk !== false),
   component: function Root() {
     const { edits } = Route.useLoaderData();
     return (
-    <html lang="pl" className="antialiased" suppressHydrationWarning>
+    <html
+      lang="pl"
+      className="antialiased"
+      {...themeAttrs(edits.theme)}
+      style={themeVars(edits.theme)}
+      suppressHydrationWarning
+    >
       <head>
         <HeadContent />
       </head>
@@ -49,6 +56,7 @@ export const Route = createRootRoute({
             <Outlet />
           </AuthProvider>
         </EditsProvider>
+        <AnalyticsSlot />
         <Toaster
           position="bottom-center"
           toastOptions={{
@@ -62,3 +70,26 @@ export const Route = createRootRoute({
     );
   },
 });
+
+function AnalyticsSlot() {
+  const pathname = useRouterState({ select: (state) => state.location.pathname });
+  const measurementId = (import.meta.env.VITE_GA_MEASUREMENT_ID as string | undefined)?.trim();
+  const [View, setView] = useState<ComponentType<{ measurementId: string }> | null>(null);
+  useEffect(() => {
+    if (!publicMeasurementEnabled({
+      id: measurementId, policyReady: privacyPolicy.ready,
+      enabled: import.meta.env.VITE_ANALYTICS_ENABLED,
+      manualEventsConfirmed: import.meta.env.VITE_GA_MANUAL_EVENTS_CONFIRMED,
+      origin: window.location.origin, path: pathname,
+    })) return;
+    let live = true;
+    void import("@/components/AnalyticsConsent").then((mod) => {
+      if (live) setView(() => mod.AnalyticsConsent);
+    });
+    return () => {
+      live = false;
+    };
+  }, [measurementId, pathname]);
+  if (!measurementId || !View) return null;
+  return <View measurementId={measurementId} />;
+}

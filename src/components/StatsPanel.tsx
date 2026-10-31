@@ -98,10 +98,14 @@ export function StatsPanel() {
   const [report, setReport] = useState<StatsPayload | null>(null);
   const [loading, setLoading] = useState(true);
   const ticket = useRef(0);
+  const statsToken = useRef("");
 
   async function load(next?: { section?: SectionId; page?: string }) {
     const password = readEditorPassword();
     if (!password) {
+      setLoading(false);
+      setReport(null);
+      statsToken.current = "";
       toast.error("Wpisz hasło edytora.");
       return;
     }
@@ -109,11 +113,13 @@ export function StatsPanel() {
     const askedPage = next?.page ?? page;
     const id = ++ticket.current;
     setLoading(true);
+    setReport(null);
     try {
       const { statsReportFn } = await import("@/lib/site-api");
       const result = await statsReportFn({
         data: {
           password,
+          statsToken: statsToken.current,
           section: asked,
           range,
           start,
@@ -129,9 +135,10 @@ export function StatsPanel() {
         toast.error(result.message || "Brak dostępu do statystyk.");
         return;
       }
+      statsToken.current = result.statsToken;
       setReport(result.report);
     } catch {
-      if (id === ticket.current) toast.error("Nie udało się pobrać raportu.");
+      if (id === ticket.current) { setReport(null); toast.error("Nie udało się pobrać raportu."); }
     } finally {
       if (id === ticket.current) setLoading(false);
     }
@@ -234,12 +241,12 @@ export function StatsPanel() {
 
       {visible?.configured && !visible.measurementConfigured ? (
         <p className="mt-4 text-sm text-muted">
-          Brakuje publicznego VITE_GA_MEASUREMENT_ID, więc strona jeszcze nie wysyła odwiedzin. Poniżej są
+          Pomiar publiczny nie jest w pełni skonfigurowany lub zatwierdzony. Poniżej są
           tylko dane, które Google naprawdę zwróciło.
         </p>
       ) : null}
       {visible?.partial ? (
-        <p className="mt-4 text-sm text-muted">Dane z dzisiaj w GA4 często dochodzą z opóźnieniem i bywają niepełne.</p>
+        <p className="mt-4 text-sm text-muted">Najnowsze dane mogą być niepełne. GA4 i Search Console aktualizują raporty z opóźnieniem.</p>
       ) : null}
 
       {visible?.configured && visible.realtime ? (
@@ -475,8 +482,8 @@ function Seo({
       </div>
       <p className="mt-4 text-xs leading-relaxed text-muted">{seo.note}</p>
       <QueryList title="Frazy" rows={seo.queries} />
-      <QueryList title="Rosnące frazy" rows={seo.rising} />
-      <QueryList title="Frazy tracące kliknięcia" rows={seo.falling} />
+      <QueryList title="Wzrosty w pobranej próbie fraz" rows={seo.rising} />
+      <QueryList title="Spadki w pobranej próbie fraz" rows={seo.falling} />
       <h2 className="mt-8 font-display text-2xl text-forest">Strony w wynikach Google</h2>
       {seo.pages.length ? (
         <ul className="mt-3 space-y-2 text-sm">
@@ -543,7 +550,9 @@ function Conversions({ report }: { report: StatsPayload | null }) {
               <div className="flex flex-wrap items-baseline justify-between gap-2">
                 <h2 className="font-display text-2xl text-forest">{event.label}</h2>
                 <p className="text-lg text-ink">
-                  {event.name === "form_start"
+                  {event.name === "form_success"
+                    ? "pomiar niedostępny"
+                    : event.name === "form_start"
                     ? "to nie jest klient"
                     : event.seen
                       ? formatCount(event.count)

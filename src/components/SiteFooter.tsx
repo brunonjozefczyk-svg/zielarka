@@ -1,5 +1,6 @@
 import { Link } from "@tanstack/react-router";
 import { Mark } from "@/components/Mark";
+import { privacyPolicy } from "@/lib/privacy-policy";
 import { site } from "@/lib/content";
 
 export function SiteFooter() {
@@ -21,6 +22,7 @@ export function SiteFooter() {
         <div>
           <p className="text-xs uppercase tracking-[0.18em] text-cream/60">Na stronie</p>
           <ul className="mt-3 space-y-2 text-sm">
+            {privacyPolicy.ready ? <li><a href="/polityka-prywatnosci" className="hover:underline">Polityka prywatności</a></li> : null}
             <li>
               <Link to="/konsultacje" className="hover:underline">
                 Konsultacje 1:1

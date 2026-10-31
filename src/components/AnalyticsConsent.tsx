@@ -1,54 +1,22 @@
-import { useEffect, useState } from "react";
-import { useRouterState } from "@tanstack/react-router";
+import { useEffect, useRef, useState } from "react";
+import { useRouter, useRouterState } from "@tanstack/react-router";
 import {
   CONSENT_STORAGE_KEY,
   claimPageView,
-  consentFromChoice,
   eventFromClick,
   pageViewKey,
   readStoredConsent,
-  sanitizeEvent,
   trackOnThisPage,
   type ConsentChoice,
 } from "@/lib/analytics";
-
-type Gtag = (...args: unknown[]) => void;
-
-declare global {
-  interface Window {
-    dataLayer?: unknown[];
-    gtag?: Gtag;
-  }
-}
-
-const pageState = { key: "", at: 0 };
-
-function installGtag(measurementId: string, choice: ConsentChoice) {
-  if (typeof window === "undefined") return;
-  window.dataLayer = window.dataLayer ?? [];
-  if (!window.gtag) {
-    window.gtag = (...args: unknown[]) => {
-      window.dataLayer?.push(args);
-    };
-    window.gtag("consent", "default", {
-      ...consentFromChoice("denied"),
-      wait_for_update: 500,
-    });
-    window.gtag("js", new Date());
-    window.gtag("config", measurementId, { send_page_view: false });
-    const script = document.createElement("script");
-    script.async = true;
-    script.src = `https://www.googletagmanager.com/gtag/js?id=${encodeURIComponent(measurementId)}`;
-    document.head.appendChild(script);
-  }
-  window.gtag("consent", "update", consentFromChoice(choice));
-}
-
-function remember(choice: ConsentChoice) {
-  localStorage.setItem(CONSENT_STORAGE_KEY, choice);
-}
+import { installMeasurement, stopMeasurement, sendPageView, sendEvent } from "@/lib/analytics-browser";
 
 export function AnalyticsConsent({ measurementId }: { measurementId: string }) {
+  const router = useRouter();
+  const pageState = useRef({ key: "", at: 0 });
+  const currentChoice = useRef<ConsentChoice | "unknown">("unknown");
+  const failedOptOut = useRef(false);
+  const [storageError, setStorageError] = useState("");
   const pathname = useRouterState({ select: (state) => state.location.pathname });
   const searchStr = useRouterState({ select: (state) => state.location.searchStr });
   const [ready, setReady] = useState(false);
@@ -56,21 +24,50 @@ export function AnalyticsConsent({ measurementId }: { measurementId: string }) {
   const [open, setOpen] = useState(false);
 
   useEffect(() => {
-    const stored = readStoredConsent(localStorage);
+    let stored: ConsentChoice | "unknown" = "unknown";
+    try { stored = readStoredConsent(window.localStorage); } catch { /* default off */ }
+    currentChoice.current = stored;
     setChoice(stored);
     setOpen(stored === "unknown");
-    if (stored === "granted") installGtag(measurementId, "granted");
+    if (stored === "granted") installMeasurement(measurementId);
     setReady(true);
   }, [measurementId]);
 
   useEffect(() => {
+    function sync() {
+      if (failedOptOut.current) return;
+      let next: ConsentChoice | "unknown" = "unknown";
+      try { next = readStoredConsent(window.localStorage); } catch { /* fail closed */ }
+      if (currentChoice.current === "granted" && next !== "granted") {
+        currentChoice.current = next;
+        stopMeasurement(measurementId);
+        window.location.reload();
+      } else if (next !== currentChoice.current) window.location.reload();
+    }
+    const onStorage = (event: StorageEvent) => {
+      if (event.key === CONSENT_STORAGE_KEY || event.key === null) sync();
+    };
+    const onVisible = () => { if (document.visibilityState === "visible") sync(); };
+    window.addEventListener("storage", onStorage);
+    document.addEventListener("visibilitychange", onVisible);
+    const unsubscribe = router.subscribe("onBeforeNavigate", ({ toLocation }) => {
+      if (currentChoice.current === "granted" && !trackOnThisPage(toLocation.pathname)) {
+        stopMeasurement(measurementId);
+        window.location.assign(toLocation.href);
+      }
+    });
+    return () => {
+      window.removeEventListener("storage", onStorage);
+      document.removeEventListener("visibilitychange", onVisible);
+      unsubscribe();
+    };
+  }, [measurementId, router]);
+
+  useEffect(() => {
     if (choice !== "granted" || !trackOnThisPage(pathname)) return;
     const key = pageViewKey(pathname, searchStr);
-    if (claimPageView(key, Date.now(), pageState)) {
-      window.gtag?.("event", "page_view", {
-        page_path: pathname,
-        page_title: document.title.slice(0, 120),
-      });
+    if (claimPageView(key, Date.now(), pageState.current)) {
+      sendPageView(pathname);
     }
   }, [choice, pathname, searchStr]);
 
@@ -85,16 +82,14 @@ export function AnalyticsConsent({ measurementId }: { measurementId: string }) {
       const href = anchor?.getAttribute("href") ?? "";
       const name = eventFromClick(href);
       if (!name) return;
-      const clean = sanitizeEvent(name, { page_path: window.location.pathname, link_url: href });
-      if (clean) window.gtag?.("event", clean.name, clean.params);
+      sendEvent(name, window.location.pathname, href);
     }
     document.addEventListener("click", onClick);
     function onSubmit(event: Event) {
       if (event.defaultPrevented || !trackOnThisPage(window.location.pathname)) return;
       const form = event.target;
       if (!(form instanceof HTMLFormElement) || !form.querySelector("[data-track='form_start']")) return;
-      const clean = sanitizeEvent("form_start", { page_path: window.location.pathname });
-      if (clean) window.gtag?.("event", clean.name, clean.params);
+      sendEvent("form_start", window.location.pathname);
     }
     document.addEventListener("submit", onSubmit);
     return () => {
@@ -104,23 +99,42 @@ export function AnalyticsConsent({ measurementId }: { measurementId: string }) {
   }, [choice]);
 
   function choose(next: ConsentChoice) {
-    remember(next);
+    // Persistence is required before opt-in, but a storage failure must never prevent opt-out.
+    let saved = true;
+    try { localStorage.setItem(CONSENT_STORAGE_KEY, next); } catch { saved = false; }
+    if (!saved && next === "granted") {
+      setStorageError("Nie udało się zapisać zgody. Analityka pozostaje wyłączona. Sprawdź ustawienia pamięci przeglądarki.");
+      return;
+    }
+    const wasGranted = currentChoice.current === "granted";
+    currentChoice.current = next;
     setChoice(next);
     setOpen(false);
-    if (next === "granted") installGtag(measurementId, "granted");
-    else window.gtag?.("consent", "update", consentFromChoice("denied"));
+    if (saved) setStorageError("");
+    if (next === "granted") installMeasurement(measurementId);
+    else if (wasGranted) {
+      stopMeasurement(measurementId);
+      // Stay disabled on this page if persistence failed; do not reload an old grant.
+      if (saved) window.location.reload();
+      else {
+        failedOptOut.current = true;
+        setStorageError("Pomiar jest zatrzymany na tej stronie, ale odmowa nie została zapisana. Po pełnym odświeżeniu może wrócić wcześniejsza zgoda.");
+      }
+    }
   }
 
-  if (!ready) return null;
+  if (!ready || !trackOnThisPage(pathname)) return null;
 
   return (
     <>
+      {storageError ? <p role="alert" className="fixed bottom-24 inset-x-4 z-50 bg-paper p-4">{storageError}</p> : null}
       {open ? (
         <div className="fixed inset-x-0 bottom-0 z-40 border-t border-line bg-paper px-4 py-4 shadow-[0_-8px_24px_rgba(26,24,20,0.08)]">
           <div className="mx-auto flex max-w-3xl flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
             <p className="max-w-xl text-sm leading-relaxed text-ink">
               Czy mogę mierzyć, które strony są czytane? Bez zgody nie włączam Google Analytics. Nie
-              wysyłam treści wiadomości, adresu e-mail ani informacji o zdrowiu.
+              wysyłam treści wiadomości, adresu e-mail ani informacji o zdrowiu.{" "}
+              <a href="/polityka-prywatnosci" className="underline">Polityka prywatności</a>.
             </p>
             <div className="flex flex-wrap gap-2">
               <button

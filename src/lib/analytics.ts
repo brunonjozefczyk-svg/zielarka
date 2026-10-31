@@ -33,13 +33,23 @@ export function consentFromChoice(choice: ConsentChoice): ConsentFlags {
 }
 
 export function readStoredConsent(storage: { getItem(key: string): string | null }): ConsentChoice | "unknown" {
-  const value = storage.getItem(CONSENT_STORAGE_KEY);
+  let value: string | null;
+  try { value = storage.getItem(CONSENT_STORAGE_KEY); } catch { return "unknown"; }
   if (value === "granted" || value === "denied") return value;
   return "unknown";
 }
 
 export function isMeasurementId(value: string | undefined | null): boolean {
   return /^G-[A-Z0-9]+$/i.test((value ?? "").trim());
+}
+
+export function publicMeasurementEnabled(config: {
+  id?: string; enabled?: string; manualEventsConfirmed?: string;
+  policyReady: boolean; origin: string; path: string;
+}): boolean {
+  return config.policyReady && config.enabled === "true" &&
+    config.manualEventsConfirmed === "true" && isMeasurementId(config.id) &&
+    config.origin === "https://zielarka.pl" && trackOnThisPage(config.path);
 }
 
 export const SETUP_STEPS = [
@@ -49,12 +59,12 @@ export const SETUP_STEPS = [
   "Z klucza weź client_email do GA4_CLIENT_EMAIL i private_key do GA4_PRIVATE_KEY (cały blok BEGIN PRIVATE KEY). Te zmienne są tylko na serwerze. Nigdy nie wkładaj ich do gita.",
   "W usłudze GA4 dodaj ten e-mail jako Przeglądający. Numer usługi, same cyfry, wpisz w GA4_PROPERTY_ID.",
   "W Search Console dodaj ten sam e-mail do użytkowników witryny. GSC_SITE_URL ustaw na zweryfikowany adres, zwykle https://zielarka.pl/",
-  "Zapisz zmienne w Vercel dla Production i Preview. Panel czyta je dopiero po haśle, gdy otworzysz Statystyki.",
+  "Sekrety konfiguruj osobno dla środowisk. Preview nie może wysyłać pomiarów do produkcyjnej usługi. Włączenie pomiaru wymaga też zatwierdzonej polityki i VITE_ANALYTICS_ENABLED=true.",
   "Dopóki zmiennych nie ma, ten ekran pokazuje tylko instrukcję. Nie pokazuje przykładowych liczb.",
 ] as const;
 
 export const GSC_STEPS = [
-  "W Search Console dodaj i zweryfikuj https://zielarka.pl/ (prefiks adresu albo domenę).",
+  "Użyj istniejącej zweryfikowanej usługi: https://zielarka.pl/ albo sc-domain:zielarka.pl.",
   "Dodaj e-mail konta usługi jako użytkownika witryny.",
   "W Vercel ustaw GSC_SITE_URL dokładnie na zweryfikowany adres.",
   "Włącz Google Search Console API w tym samym projekcie Cloud.",
@@ -93,7 +103,10 @@ export function sanitizeEvent(name: string, params?: Record<string, unknown>) {
   const href = typeof params?.link_url === "string" ? params.link_url : "";
   if (href.toLowerCase().startsWith("tel:")) out.link_kind = "tel";
   else if (href.toLowerCase().startsWith("mailto:")) out.link_kind = "mailto";
-  else if (href.startsWith("/") && href.length <= 180) out.link_url = href.split("?")[0] ?? href;
+  else if (href.startsWith("/")) {
+    const link = (href.split("?")[0] ?? "").split("#")[0] ?? "";
+    if (link.startsWith("/") && link.length > 0 && link.length <= 180) out.link_url = link;
+  }
   return { name: name as TrackEvent, params: out };
 }
 
@@ -118,7 +131,7 @@ export function eventFromClick(href: string): TrackEvent | null {
 }
 
 export const CONVERSION_NOTE =
-  "Potwierdzonym zgłoszeniem jest tylko zdarzenie po odpowiedzi usługi formularza. Adres /kontakt?wyslane=1 da się wpisać ręcznie, więc nie jest klientem. Kliknięcie „Wyślij” też nie. Formularz na stronie nadal wysyła wiadomość po staremu — nie przełączałem go bez Twojej zgody. Do Google nie idzie treść wiadomości, e-mail ani opis zdrowia.";
+  "Pomiar potwierdzonych zgłoszeń jest niedostępny. Formularz wysyła wiadomości bezpośrednio przez FormSubmit. Kliknięcie wysłania ani adres /kontakt?wyslane=1 nie potwierdzają dostarczenia wiadomości.";
 
 export function formSuccessPath(_pathname: string, _search: string): boolean {
   return false;
@@ -134,7 +147,7 @@ export function shouldCountDelivery(accepted: boolean, receipt: string, seen: Se
 }
 
 export function trackOnThisPage(pathname: string): boolean {
-  return pathname !== "/edytuj" && !pathname.startsWith("/edytuj/");
+  return /^(?:\/|\/(?:kontakt|konsultacje|warsztaty|klub|o-mnie|zielnik)\/?|\/zielnik\/[a-z0-9-]{1,80}\/?)$/.test(pathname);
 }
 
 export function pageViewKey(pathname: string, search: string): string {
@@ -155,9 +168,9 @@ export type RangeId = "today" | "7" | "30" | "90" | "custom";
 
 export type DateWindow = { start: string; end: string; label: string; partial: boolean };
 
-export function warsawDay(now: Date): string {
+export function warsawDay(now: Date, timeZone = "Europe/Warsaw"): string {
   return new Intl.DateTimeFormat("en-CA", {
-    timeZone: "Europe/Warsaw",
+    timeZone,
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
@@ -171,20 +184,24 @@ export function shiftIso(day: string, delta: number): string {
   return next.toISOString().slice(0, 10);
 }
 
-export function resolveRange(id: RangeId, custom?: { start?: string; end?: string }, now = new Date()): DateWindow | null {
-  const end = warsawDay(now);
+export function resolveRange(id: RangeId, custom?: { start?: string; end?: string }, now = new Date(), timeZone = "Europe/Warsaw"): DateWindow | null {
+  const end = warsawDay(now, timeZone);
   if (id === "today") return { start: end, end, label: "Dzisiaj", partial: true };
-  if (id === "7") return { start: shiftIso(end, -6), end, label: "Ostatnie 7 dni", partial: false };
-  if (id === "30") return { start: shiftIso(end, -29), end, label: "Ostatnie 30 dni", partial: false };
-  if (id === "90") return { start: shiftIso(end, -89), end, label: "Ostatnie 90 dni", partial: false };
+  if (id === "7") return { start: shiftIso(end, -6), end, label: "Ostatnie 7 dni", partial: true };
+  if (id === "30") return { start: shiftIso(end, -29), end, label: "Ostatnie 30 dni", partial: true };
+  if (id === "90") return { start: shiftIso(end, -89), end, label: "Ostatnie 90 dni", partial: true };
   if (id !== "custom") return null;
   const start = custom?.start ?? "";
   const finish = custom?.end ?? "";
   if (!/^\d{4}-\d{2}-\d{2}$/.test(start) || !/^\d{4}-\d{2}-\d{2}$/.test(finish)) return null;
-  if (start > finish) return null;
+  if (start > finish || finish > end) return null;
+  for (const day of [start, finish]) {
+    const date = new Date(`${day}T00:00:00Z`);
+    if (!Number.isFinite(date.getTime()) || date.toISOString().slice(0, 10) !== day) return null;
+  }
   const span = (Date.parse(`${finish}T00:00:00Z`) - Date.parse(`${start}T00:00:00Z`)) / 86400000;
   if (!Number.isFinite(span) || span > 366) return null;
-  return { start, end: finish, label: `${start} – ${finish}`, partial: false };
+  return { start, end: finish, label: `${start} – ${finish}`, partial: finish === end };
 }
 
 export function previousWindow(start: string, end: string): DateWindow {
@@ -291,7 +308,8 @@ export function parseSeries(report: GaRunReport | null | undefined): SeriesPoint
       sessions: num(cell(row, metrics, "sessions", "metric")),
       views: num(cell(row, metrics, "screenPageViews", "metric")),
     }))
-    .filter((point) => point.date);
+    .filter((point) => point.date)
+    .sort((a, b) => a.date.localeCompare(b.date));
 }
 
 export type PageStat = {
@@ -482,7 +500,7 @@ export function queryMovement(current: GscRow[], previous: GscRow[]) {
 }
 
 export const GSC_PRIVACY_NOTE =
-  "Search Console ukrywa rzadkie frazy. To nie jest pełna lista wyszukiwań jednej osoby. Brak wiersza nie oznacza zera.";
+  "Search Console ukrywa rzadkie frazy. Porównujemy tylko pobrane czołowe frazy (25 obecnych i 50 poprzednich), nie pełną listę wzrostów i spadków. Brak wiersza nie oznacza zera. Daty GSC są w strefie America/Los_Angeles; najnowsze dni mogą być niedostępne.";
 
 export const ENGAGEMENT_NOTE =
   "Średni czas zaangażowania to userEngagementDuration podzielone przez activeUsers. GA4 liczy czas, gdy karta była na wierzchu. To nie jest stoper konkretnej osoby.";
@@ -552,7 +570,8 @@ export function gaBody(options: {
   if (options.dimensions?.length) body.dimensions = options.dimensions.map((name) => ({ name }));
   if (options.filter) body.dimensionFilter = options.filter;
   if (options.limit) body.limit = options.limit;
-  if (options.orderMetric) body.orderBys = [{ metric: { metricName: options.orderMetric }, desc: true }];
+  if (options.dimensions?.includes("date")) body.orderBys = [{ dimension: { dimensionName: "date" }, desc: false }];
+  else if (options.orderMetric) body.orderBys = [{ metric: { metricName: options.orderMetric }, desc: true }];
   if (options.totals) body.metricAggregations = ["TOTAL"];
   return body;
 }

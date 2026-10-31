@@ -2,6 +2,7 @@
  * Raporty GA4 i Search Console. Sekrety tylko ze zmiennych serwera.
  * Brak VITE_ w odpowiedziach z liczbami, gdy konta nie podłączono.
  */
+import { privacyPolicy } from "./privacy-policy";
 import { createHmac, createSign, randomBytes, timingSafeEqual } from "node:crypto";
 import {
   CONVERSION_NOTE,
@@ -62,6 +63,7 @@ export type AnalyticsEnv = {
   privateKey: string;
   siteUrl: string;
   measurementId: string;
+  measurementEnabled: boolean;
   gaOk: boolean;
   gscOk: boolean;
 };
@@ -73,8 +75,11 @@ export function readAnalyticsEnv(env: NodeJS.ProcessEnv = process.env): Analytic
   const siteUrl = (env.GSC_SITE_URL ?? "").trim();
   const measurementId = (env.VITE_GA_MEASUREMENT_ID ?? "").trim();
   const gaOk = /^\d+$/.test(propertyId) && clientEmail.includes("@") && privateKey.includes("BEGIN PRIVATE KEY");
-  const gscOk = gaOk && /^https?:\/\/.+/i.test(siteUrl);
-  return { propertyId, clientEmail, privateKey, siteUrl, measurementId, gaOk, gscOk };
+  const credentialsOk = clientEmail.includes("@") && privateKey.includes("BEGIN PRIVATE KEY");
+  const gscOk = credentialsOk && (/^sc-domain:[a-z0-9.-]+$/i.test(siteUrl) || /^https?:\/\/[^/?#]+\/[^?#]*$/i.test(siteUrl));
+  return { propertyId, clientEmail, privateKey, siteUrl, measurementId, gaOk, gscOk,
+    measurementEnabled: privacyPolicy.ready && env.VITE_ANALYTICS_ENABLED === "true" && env.VITE_GA_MANUAL_EVENTS_CONFIRMED === "true" && isMeasurementId(measurementId),
+  };
 }
 
 function b64url(value: string | Buffer) {
@@ -206,9 +211,9 @@ function base(
 ): StatsPayload {
   return blankReport(query.section, {
     configured: true,
-    gaConfigured: true,
+    gaConfigured: env.gaOk,
     gscConfigured: env.gscOk,
-    measurementConfigured: isMeasurementId(env.measurementId),
+    measurementConfigured: env.measurementEnabled,
     title: "",
     steps: [],
     rangeLabel: range.label,
@@ -226,30 +231,30 @@ export async function loadStats(
   const now = deps?.now ?? new Date();
   const fetcher = deps?.fetch ?? fetch;
   const box = deps?.memory ?? memory;
-  if (!env.gaOk) {
+  if (query.section !== "seo" && !env.gaOk) {
     return blankReport(query.section, {
       title: "Nie skonfigurowano",
       steps: [...SETUP_STEPS],
-      measurementConfigured: isMeasurementId(env.measurementId),
+      measurementConfigured: env.measurementEnabled,
     });
   }
   if (query.section === "seo" && !env.gscOk) {
     return blankReport(query.section, {
-      gaConfigured: true,
+      gaConfigured: env.gaOk,
       gscConfigured: false,
-      measurementConfigured: isMeasurementId(env.measurementId),
+      measurementConfigured: env.measurementEnabled,
       title: "Nie skonfigurowano",
       steps: [...GSC_STEPS],
       note: "Search Console nie jest podłączone. Pozostałe zakładki mogą działać.",
     });
   }
-  const range = resolveRange(query.range, { start: query.start, end: query.end }, now);
+  const range = resolveRange(query.range, { start: query.start, end: query.end }, now, query.section === "seo" ? "America/Los_Angeles" : "Europe/Warsaw");
   if (!range) {
     return blankReport(query.section, {
       configured: true,
-      gaConfigured: true,
+      gaConfigured: env.gaOk,
       gscConfigured: env.gscOk,
-      measurementConfigured: isMeasurementId(env.measurementId),
+      measurementConfigured: env.measurementEnabled,
       title: "",
       steps: [],
       error: "Podaj daty w formacie RRRR-MM-DD. Zakres nie może być dłuższy niż rok.",
@@ -261,7 +266,7 @@ export async function loadStats(
   if (query.section === "page" && !page) {
     return blankReport(query.section, {
       configured: true,
-      gaConfigured: true,
+      gaConfigured: env.gaOk,
       gscConfigured: env.gscOk,
       title: "",
       steps: [],
@@ -272,6 +277,8 @@ export async function loadStats(
     });
   }
   const cacheKey = JSON.stringify({
+    propertyId: env.propertyId,
+    siteUrl: env.siteUrl,
     section: query.section,
     start: range.start,
     end: range.end,
@@ -286,7 +293,11 @@ export async function loadStats(
   try {
     const token = await fetchAccessToken(env.clientEmail, env.privateKey, nowMs, fetcher, box);
     const report = hit ?? (await buildReport(query, env, range, { page, device, country }, token, fetcher));
-    if (!hit) box.reports.set(cacheKey, { at: nowMs, value: report });
+    if (!hit) {
+      // Bound memory use across arbitrary date/filter requests.
+      if (box.reports.size >= 100) box.reports.delete(box.reports.keys().next().value!);
+      box.reports.set(cacheKey, { at: nowMs, value: report });
+    }
     if (query.section !== "overview") return report;
     const liveKey = "realtime";
     const liveHit = cacheHit(box.reports.get(liveKey) as { at: number; value: number | null } | undefined, nowMs, LIVE_TTL);
@@ -311,9 +322,9 @@ export async function loadStats(
     const message = error instanceof Error && error.message.length < 220 ? error.message : "Nie udało się pobrać raportu.";
     return blankReport(query.section, {
       configured: true,
-      gaConfigured: true,
+      gaConfigured: env.gaOk,
       gscConfigured: env.gscOk,
-      measurementConfigured: isMeasurementId(env.measurementId),
+      measurementConfigured: env.measurementEnabled,
       title: "",
       steps: [],
       error: message,
@@ -339,7 +350,7 @@ async function buildReport(
     const current = await runGa(
       env.propertyId,
       token,
-      gaBody({ start: range.start, end: range.end, dimensions: ["date"], filter: device, totals: true, limit: 100 }),
+      gaBody({ start: range.start, end: range.end, dimensions: ["date"], filter: device, totals: true, limit: 367 }),
       fetcher,
     );
     const before = await runGa(
@@ -357,7 +368,7 @@ async function buildReport(
   if (query.section === "organic") {
     const organic = andFilters([exactFilter("sessionDefaultChannelGroup", "Organic Search"), device]);
     const [trend, pages, engines, all] = await Promise.all([
-      runGa(env.propertyId, token, gaBody({ start: range.start, end: range.end, dimensions: ["date"], filter: organic, totals: true, limit: 100 }), fetcher),
+      runGa(env.propertyId, token, gaBody({ start: range.start, end: range.end, dimensions: ["date"], filter: organic, totals: true, limit: 367 }), fetcher),
       runGa(env.propertyId, token, gaBody({ start: range.start, end: range.end, dimensions: ["pagePath"], metrics: ["screenPageViews", "activeUsers", "sessions", "userEngagementDuration"], filter: organic, orderMetric: "screenPageViews", limit: 20 }), fetcher),
       runGa(env.propertyId, token, gaBody({ start: range.start, end: range.end, dimensions: ["sessionSource"], metrics: ["sessions", "activeUsers"], filter: organic, orderMetric: "sessions", limit: 15 }), fetcher),
       runGa(env.propertyId, token, gaBody({ start: range.start, end: range.end, metrics: ["sessions", "activeUsers"], filter: device, totals: true }), fetcher),
@@ -447,7 +458,7 @@ async function buildReport(
     const [current, before, trend, channels, events] = await Promise.all([
       runGa(env.propertyId, token, gaBody({ start: range.start, end: range.end, filter: onPage, totals: true }), fetcher),
       runGa(env.propertyId, token, gaBody({ start: prev.start, end: prev.end, filter: onPage, totals: true }), fetcher),
-      runGa(env.propertyId, token, gaBody({ start: range.start, end: range.end, dimensions: ["date"], filter: onPage, limit: 100 }), fetcher),
+      runGa(env.propertyId, token, gaBody({ start: range.start, end: range.end, dimensions: ["date"], filter: onPage, limit: 367 }), fetcher),
       runGa(env.propertyId, token, gaBody({ start: range.start, end: range.end, dimensions: ["sessionDefaultChannelGroup"], metrics: ["sessions", "activeUsers"], filter: onPage, limit: 12 }), fetcher),
       runGa(env.propertyId, token, gaBody({ start: range.start, end: range.end, dimensions: ["eventName"], metrics: ["eventCount"], filter: andFilters([onPage, inListFilter("eventName", [...TRACK_EVENTS])]), limit: 20 }), fetcher),
     ]);

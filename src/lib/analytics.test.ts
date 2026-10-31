@@ -82,6 +82,19 @@ test("zdarzenia nie zabierają treści wiadomości ani adresu", () => {
   assert.equal(receiptValid(`${receipt}x`, "sekret-testowy", 1_700_000_000_000), false);
   assert.equal(shouldCountDelivery(true, receipt, seen), true);
   assert.equal(shouldCountDelivery(true, receipt, seen), false);
+  const both = sanitizeEvent("workshop_click", {
+    page_path: "/warsztaty",
+    link_url: "/warsztaty?z=1#sekret",
+  });
+  assert.equal(both?.params.link_url, "/warsztaty");
+  assert.equal(JSON.stringify(both).includes("sekret"), false);
+  assert.equal(JSON.stringify(both).includes("z=1"), false);
+  const queryOnly = sanitizeEvent("consultation_click", { link_url: "/konsultacje?email=a@b.c" });
+  assert.equal(queryOnly?.params.link_url, "/konsultacje");
+  assert.equal(JSON.stringify(queryOnly).includes("a@b.c"), false);
+  const hashOnly = sanitizeEvent("consultation_click", { link_url: "/konsultacje#fragment-tajny" });
+  assert.equal(hashOnly?.params.link_url, "/konsultacje");
+  assert.equal(JSON.stringify(hashOnly).includes("fragment-tajny"), false);
   const start = sanitizeEvent("form_start", { page_path: "/kontakt", message: "boli mnie gardło", email: "a@b.c" });
   assert.equal(JSON.stringify(start).includes("gardło"), false);
   assert.equal(start?.name, "form_start");
@@ -146,7 +159,7 @@ test("niepełny zakres dat jest odrzucany", () => {
     start: "2026-10-01",
     end: "2026-10-25",
     label: "2026-10-01 – 2026-10-25",
-    partial: false,
+    partial: true,
   });
   assert.equal(resolveRange("today", undefined, now)?.partial, true);
 });
@@ -307,4 +320,145 @@ test("Search Console bez adresu witryny nie pokazuje kliknięć", async () => {
   assert.equal(report.title, "Nie skonfigurowano");
   assert.equal(report.seo, null);
   assert.match(report.steps.join("\n"), /GSC_SITE_URL/);
+});
+
+test("raport GSC działa bez GA4 i obsługuje usługę domenową", async () => {
+  const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  const calls: string[] = [];
+  const result = await loadStats({ section: "seo", range: "7" }, {
+    env: { GA4_CLIENT_EMAIL: "test@example.invalid", GA4_PRIVATE_KEY: privateKey.export({ type: "pkcs8", format: "pem" }).toString(), GSC_SITE_URL: "sc-domain:zielarka.pl" },
+    memory: { token: null, reports: new Map() },
+    now: new Date("2026-10-31T01:00:00Z"),
+    fetch: async (url) => {
+      calls.push(url);
+      return Response.json(url.includes("oauth2") ? { access_token: "test", expires_in: 3600 } : { rows: [{ clicks: 2, impressions: 10, ctr: 0.2, position: 3 }] });
+    },
+  });
+  assert.equal(result.configured, true);
+  assert.equal(result.gaConfigured, false);
+  assert.equal(result.gscConfigured, true);
+  assert.equal(result.end, "2026-10-30");
+  assert.equal(result.seo?.clicks, 2);
+  assert.equal(calls.some(url => url.includes("sc-domain%3Azielarka.pl")), true);
+  assert.equal(calls.some(url => url.includes("analyticsdata")), false);
+});
+
+test("daty: nieistniejący dzień, przyszłość, oznaczenie bieżącego dnia", () => {
+  const now = new Date("2026-10-31T12:00:00Z");
+  assert.equal(resolveRange("custom", { start: "2026-02-30", end: "2026-03-10" }, now), null);
+  assert.equal(resolveRange("custom", { start: "2026-10-01", end: "2026-11-01" }, now), null);
+  for (const range of ["7", "30", "90"] as const) assert.equal(resolveRange(range, undefined, now)?.partial, true);
+});
+
+test("błąd pamięci zgody nie włącza pomiaru", () => {
+  assert.equal(readStoredConsent({ getItem() { throw new Error("blocked"); } }), "unknown");
+});
+
+test("serie są sortowane, a roczne zapytania nie obcinają dni", async () => {
+  const { gaBody } = await import("./analytics.ts");
+  const body = gaBody({ start: "2025-10-31", end: "2026-10-31", dimensions: ["date"], limit: 367 });
+  assert.deepEqual(body.orderBys, [{ dimension: { dimensionName: "date" }, desc: false }]);
+  const series = parseSeries({ dimensionHeaders: [{ name: "date" }], metricHeaders: [{ name: "activeUsers" }], rows: ["20261031", "20261001"].map(value => ({ dimensionValues: [{ value }], metricValues: [{ value: "1" }] })) });
+  assert.deepEqual(series.map(row => row.date), ["2026-10-01", "2026-10-31"]);
+});
+
+test("błędy Google nie ujawniają surowej odpowiedzi ani nie udają danych", async () => {
+  const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  for (const status of [401, 403, 429, 500]) {
+    const report = await loadStats({ section: "overview", range: "7" }, {
+      env: { GA4_PROPERTY_ID: "123", GA4_CLIENT_EMAIL: "test@example.invalid", GA4_PRIVATE_KEY: privateKey.export({ type: "pkcs8", format: "pem" }).toString() },
+      memory: { token: null, reports: new Map() },
+      fetch: async () => new Response("PRIVATE-UPSTREAM-PAYLOAD", { status }),
+    });
+    assert.ok(report.error);
+    assert.equal(report.totals, null);
+    assert.equal(JSON.stringify(report).includes("PRIVATE-UPSTREAM-PAYLOAD"), false);
+  }
+});
+
+test("sesja statystyk omija Blob tylko po uwierzytelnieniu, wygasa i jest związana z klientem", async () => {
+  const { authorizeStats, statsSessionKey } = await import("./stats-session.server.ts");
+  const good = "a".repeat(32);
+  const password = "haslo-edytora-testowe";
+  let calls = 0;
+  const gate = async (given: string) => {
+    calls++;
+    return { ok: given === password, message: "denied" };
+  };
+  const now = 1_800_000_000_000;
+  const depsFor = (session: string | undefined, editorPassword: string) => ({
+    secret: statsSessionKey(session, editorPassword),
+    now,
+    gate,
+  });
+  assert.equal(statsSessionKey(undefined, password), "");
+  assert.equal(statsSessionKey("", password), "");
+  assert.equal(statsSessionKey(" ".repeat(32), password), "");
+  assert.equal(statsSessionKey("\t".repeat(32), password), "");
+  assert.equal(statsSessionKey("  krotki  ", password), "");
+  assert.equal(statsSessionKey(`  ${good}  `, password), `${good}\0${password}`);
+  for (const session of [undefined, "", " ".repeat(32), "\t".repeat(32), "  krotki  "] as const) {
+    const before = calls;
+    const weak = await authorizeStats(password, "", "client-a", depsFor(session, password));
+    assert.equal(weak.ok, true);
+    assert.equal(weak.token, "");
+    assert.equal(calls, before + 1);
+  }
+  const rawSpaces = await authorizeStats(password, "", "client-a", {
+    secret: `${" ".repeat(32)}\0${password}`,
+    now,
+    gate,
+  });
+  assert.equal(rawSpaces.ok, true);
+  assert.equal(rawSpaces.token, "");
+  const denied = await authorizeStats("wrong", "", "client-a", depsFor(good, password));
+  assert.equal(denied.ok, false);
+  const login = await authorizeStats(password, "", "client-a", depsFor(good, password));
+  assert.equal(login.ok, true);
+  assert.equal(login.token.includes(password), false);
+  assert.equal(login.token.includes(good), false);
+  const atLogin = calls;
+  assert.equal((await authorizeStats("", login.token, "client-a", depsFor(good, password))).ok, true);
+  assert.equal(calls, atLogin);
+  for (const [token, client, options] of [
+    [login.token + "x", "client-a", depsFor(good, password)],
+    [login.token + ".", "client-a", depsFor(good, password)],
+    [login.token, "client-b", depsFor(good, password)],
+    [login.token, "client-a", { ...depsFor(good, password), now: now + 300_001 }],
+    [login.token, "client-a", depsFor("b".repeat(32), password)],
+    [login.token, "client-a", depsFor(good, "inne-haslo")],
+  ] as const) assert.equal((await authorizeStats("wrong", token, client, options)).ok, false);
+  assert.equal(calls, atLogin + 6);
+});
+
+test("pomiar publiczny wymaga zatwierdzenia i właściwej domeny, a Preview jest wyłączone", async () => {
+  const { publicMeasurementEnabled } = await import("./analytics.ts");
+  const config = { id: "G-TEST123", enabled: "true", manualEventsConfirmed: "true", policyReady: true, origin: "https://zielarka.pl", path: "/kontakt" };
+  assert.equal(publicMeasurementEnabled(config), true);
+  for (const override of [{ policyReady: false }, { enabled: "false" }, { manualEventsConfirmed: undefined }, { origin: "https://zielarka-preview.vercel.app" }, { origin: "http://localhost:8080" }, { path: "/edytuj" }, { path: "/edytuj/sekret" }, { id: "bad" }]) {
+    assert.equal(publicMeasurementEnabled({ ...config, ...override }), false);
+  }
+});
+
+test("roczny raport pobiera wszystkie 367 dni zamiast limitu 100", async () => {
+  const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  const report = await loadStats({ section: "overview", range: "custom", start: "2025-10-30", end: "2026-10-31" }, {
+    env: { GA4_PROPERTY_ID: "123", GA4_CLIENT_EMAIL: "test@example.invalid", GA4_PRIVATE_KEY: privateKey.export({ type: "pkcs8", format: "pem" }).toString() },
+    now: new Date("2026-10-31T12:00:00Z"), memory: { token: null, reports: new Map() },
+    fetch: async (url, init) => {
+      if (url.includes("oauth2")) return Response.json({ access_token: "test", expires_in: 3600 });
+      const body = JSON.parse(String(init?.body));
+      if (body.dimensions?.some((dim: { name: string }) => dim.name === "date")) {
+        assert.deepEqual(body.orderBys, [{ dimension: { dimensionName: "date" }, desc: false }]);
+        const rows = Array.from({ length: Math.min(367, Number(body.limit)) }, (_, i) => {
+          const date = new Date(Date.UTC(2025, 9, 30 + i)).toISOString().slice(0, 10).replaceAll("-", "");
+          return { dimensionValues: [{ value: date }], metricValues: [{ value: "1" }] };
+        });
+        return Response.json({ dimensionHeaders: [{ name: "date" }], metricHeaders: [{ name: "activeUsers" }], rows });
+      }
+      return Response.json({ metricHeaders: [{ name: "activeUsers" }], rows: [{ metricValues: [{ value: "1" }] }] });
+    },
+  });
+  assert.equal(report.series?.length, 367);
+  assert.equal(report.series?.at(-1)?.date, "2026-10-31");
 });

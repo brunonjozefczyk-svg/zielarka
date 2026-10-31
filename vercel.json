@@ -1,4 +1,5 @@
 {
+  "git": { "deploymentEnabled": { "analityka": false, "codex/analityka-review": false, "optymalizacja-szybkosc": false } },
   "headers": [
     {
       "source": "/(.*)",

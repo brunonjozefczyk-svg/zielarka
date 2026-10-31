@@ -393,6 +393,7 @@ const STAT_DEVICES = new Set(["", "desktop", "mobile", "tablet"]);
 export const statsReportFn = createServerFn({ method: "POST" })
   .validator((data: {
     password?: string;
+    statsToken?: string;
     section?: string;
     range?: string;
     start?: string;
@@ -401,7 +402,8 @@ export const statsReportFn = createServerFn({ method: "POST" })
     device?: string;
     country?: string;
   }) => ({
-    password: data.password ?? "",
+    password: typeof data.password === "string" ? data.password.slice(0, 1024) : "",
+    statsToken: typeof data.statsToken === "string" ? data.statsToken.slice(0, 200) : "",
     section: STAT_SECTIONS.has(data.section ?? "") ? (data.section as "overview") : "overview",
     range: STAT_RANGES.has(data.range ?? "") ? (data.range as "30") : "30",
     start: (data.start ?? "").slice(0, 10),
@@ -411,8 +413,13 @@ export const statsReportFn = createServerFn({ method: "POST" })
     country: (data.country ?? "").trim().toLowerCase().slice(0, 8),
   }))
   .handler(async ({ data }) => {
-    const result = await gate(data.password);
-    if (!result.ok) return { ok: false as const, report: null, message: result.message };
+    const { authorizeStats, statsSessionKey } = await import("./stats-session.server");
+    const { editorClientKey } = await import("./client-key.server");
+    const result = await authorizeStats(data.password, data.statsToken, editorClientKey(), {
+      secret: statsSessionKey(process.env.STATS_SESSION_SECRET, process.env.EDITOR_PASSWORD ?? ""),
+      gate,
+    });
+    if (!result.ok) return { ok: false as const, report: null, message: result.message, statsToken: "" };
     const { loadStats } = await import("./analytics.server");
     const report = await loadStats({
       section: data.section,
@@ -423,7 +430,7 @@ export const statsReportFn = createServerFn({ method: "POST" })
       device: data.device,
       country: data.country,
     });
-    return { ok: true as const, report, message: "" };
+    return { ok: true as const, report, message: "", statsToken: result.token };
   });
 
 export { empty };

@@ -1,39 +1,15 @@
-# Polityka prywatności Zielarka.pl — SZKIC DO ZATWIERDZENIA
+# Polityka prywatności: stan roboczy
 
-Ten plik nie jest opublikowany. Nie jest podlinkowany na stronie. Nie jest poradą prawną.
-Właścicielka musi go przeczytać i zaakceptować, zanim trafi do menu albo stopki.
+Aktualny szkic znajduje się w `src/lib/privacy-policy.ts` i jest renderowany przez
+`/polityka-prywatnosci`. Flaga `ready` pozostaje `false`. Strona szkicu ma `noindex`;
+link w stopce pojawia się dopiero po zatwierdzeniu. Analityka również wymaga tej flagi.
 
-## Kto prowadzi stronę
+Przed zmianą `ready` właścicielka musi uzupełnić i zatwierdzić:
+1. Pełne dane administratora i kontakt.
+2. Cele, podstawy przetwarzania, retencję i prawa osób.
+3. Dostawców (Vercel, SeoHost, Google, FormSubmit), umowy i transfery danych.
+4. Rzeczywiste ustawienia GA4, cookies i sposób zarządzania zgodą.
+5. Zasady Klubu działającego poza stroną, jeżeli mają być objęte tym dokumentem.
 
-Sabina Józefczyk, zielarka-fitoterapeutka, Zielarka.pl.
-Kontakt w sprawach strony i wiadomości z formularza: kontakt@zielarka.pl.
-
-## Formularz
-
-Wiadomość z formularza na stronie Kontakt idzie na skrzynkę kontakt@zielarka.pl przez usługę FormSubmit.
-Nie powstaje z niej kartoteka medyczna na tej stronie i nie jest publikowana.
-Treść wiadomości nie jest wysyłana do Google Analytics.
-
-## Konta odwiedzających
-
-Strona nie zakłada konta gościowi. Hasło edytora służy tylko Sabinie do zmian na stronie.
-Klub Zielarski działa poza tą stroną. Ewentualna lista mailingowa albo społeczność klubu nie jest bazą tej witryny.
-
-## Analityka
-
-Google Analytics 4 i Google Search Console są używane do tego, żeby widzieć, które strony są czytane i jakie frazy prowadzą z Google.
-Skrypt pomiarowy nie ładuje się, zanim odwiedzający zaakceptuje analitykę.
-Domyślna zgoda (Consent Mode v2) jest odmowna: analityka i reklamy są wyłączone.
-Reklam nie prowadzimy. Odrzucenie albo późniejsza zmiana decyzji są tak samo dostępne jak akceptacja.
-Do Google nie wysyłamy treści wiadomości, imienia, adresu e-mail, numeru telefonu ani opisu zdrowia.
-Zdarzenia, które mogą być zliczone po zgodzie, to tylko: przejście do konsultacji, warsztatów albo klubu, kliknięcie telefonu, kliknięcie e-maila, kliknięcie wysłania formularza oraz potwierdzone wysłanie formularza.
-
-## Szkice
-
-Nieopublikowane karty roślin nie są widoczne na stronie publicznej.
-Kopie zapasowe treści są szyfrowane. Linki do prywatnych plików nie są pokazywane gościom.
-
-## Czego ten szkic nie rozstrzyga
-
-Dokładnej podstawy prawnej, czasu przechowywania logów u dostawców (Vercel, SeoHost, Google, FormSubmit) i treści obowiązującej na koncie Klubu.
-To trzeba dopisać albo potwierdzić przed publikacją.
+Nie traktować szkicu jako gotowej polityki. Nie deklarować szyfrowania i dostępności
+kopii zapasowych bez osobnej weryfikacji. Pomiar dostarczenia formularza jest niedostępny.

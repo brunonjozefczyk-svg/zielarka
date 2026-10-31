@@ -136,7 +136,7 @@ export function ContactForm() {
         autoComplete="off"
         aria-hidden="true"
       />
-      <Button type="submit" size="lg">
+      <Button type="submit" size="lg" data-track="form_start">
         Wyślij zgłoszenie
       </Button>
       <p className="text-sm leading-relaxed text-muted">

@@ -15,6 +15,7 @@ import { Route as KlubRouteImport } from './routes/klub'
 import { Route as KonsultacjeRouteImport } from './routes/konsultacje'
 import { Route as KontaktRouteImport } from './routes/kontakt'
 import { Route as OMnieRouteImport } from './routes/o-mnie'
+import { Route as PolitykaPrywatnosciRouteImport } from './routes/polityka-prywatnosci'
 import { Route as SitemapDotxmlRouteImport } from './routes/sitemap[.]xml'
 import { Route as WarsztatyRouteImport } from './routes/warsztaty'
 import { Route as ZielnikRouteImport } from './routes/zielnik'
@@ -50,6 +51,11 @@ const KontaktRoute = KontaktRouteImport.update({
 const OMnieRoute = OMnieRouteImport.update({
   id: '/o-mnie',
   path: '/o-mnie',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const PolitykaPrywatnosciRoute = PolitykaPrywatnosciRouteImport.update({
+  id: '/polityka-prywatnosci',
+  path: '/polityka-prywatnosci',
   getParentRoute: () => rootRouteImport,
 } as any)
 const SitemapDotxmlRoute = SitemapDotxmlRouteImport.update({
@@ -90,6 +96,7 @@ export interface FileRoutesByFullPath {
   '/konsultacje': typeof KonsultacjeRoute
   '/kontakt': typeof KontaktRoute
   '/o-mnie': typeof OMnieRoute
+  '/polityka-prywatnosci': typeof PolitykaPrywatnosciRoute
   '/sitemap.xml': typeof SitemapDotxmlRoute
   '/warsztaty': typeof WarsztatyRoute
   '/zielnik': typeof ZielnikRouteWithChildren
@@ -104,6 +111,7 @@ export interface FileRoutesByTo {
   '/konsultacje': typeof KonsultacjeRoute
   '/kontakt': typeof KontaktRoute
   '/o-mnie': typeof OMnieRoute
+  '/polityka-prywatnosci': typeof PolitykaPrywatnosciRoute
   '/sitemap.xml': typeof SitemapDotxmlRoute
   '/warsztaty': typeof WarsztatyRoute
   '/zielnik/$slug': typeof ZielnikSlugRoute
@@ -118,6 +126,7 @@ export interface FileRoutesById {
   '/konsultacje': typeof KonsultacjeRoute
   '/kontakt': typeof KontaktRoute
   '/o-mnie': typeof OMnieRoute
+  '/polityka-prywatnosci': typeof PolitykaPrywatnosciRoute
   '/sitemap.xml': typeof SitemapDotxmlRoute
   '/warsztaty': typeof WarsztatyRoute
   '/zielnik': typeof ZielnikRouteWithChildren
@@ -134,6 +143,7 @@ export interface FileRouteTypes {
     | '/konsultacje'
     | '/kontakt'
     | '/o-mnie'
+    | '/polityka-prywatnosci'
     | '/sitemap.xml'
     | '/warsztaty'
     | '/zielnik'
@@ -148,6 +158,7 @@ export interface FileRouteTypes {
     | '/konsultacje'
     | '/kontakt'
     | '/o-mnie'
+    | '/polityka-prywatnosci'
     | '/sitemap.xml'
     | '/warsztaty'
     | '/zielnik/$slug'
@@ -161,6 +172,7 @@ export interface FileRouteTypes {
     | '/konsultacje'
     | '/kontakt'
     | '/o-mnie'
+    | '/polityka-prywatnosci'
     | '/sitemap.xml'
     | '/warsztaty'
     | '/zielnik'
@@ -176,6 +188,7 @@ export interface RootRouteChildren {
   KonsultacjeRoute: typeof KonsultacjeRoute
   KontaktRoute: typeof KontaktRoute
   OMnieRoute: typeof OMnieRoute
+  PolitykaPrywatnosciRoute: typeof PolitykaPrywatnosciRoute
   SitemapDotxmlRoute: typeof SitemapDotxmlRoute
   WarsztatyRoute: typeof WarsztatyRoute
   ZielnikRoute: typeof ZielnikRouteWithChildren
@@ -224,6 +237,13 @@ declare module '@tanstack/react-router' {
       path: '/o-mnie'
       fullPath: '/o-mnie'
       preLoaderRoute: typeof OMnieRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/polityka-prywatnosci': {
+      id: '/polityka-prywatnosci'
+      path: '/polityka-prywatnosci'
+      fullPath: '/polityka-prywatnosci'
+      preLoaderRoute: typeof PolitykaPrywatnosciRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/sitemap.xml': {
@@ -291,6 +311,7 @@ const rootRouteChildren: RootRouteChildren = {
   KonsultacjeRoute: KonsultacjeRoute,
   KontaktRoute: KontaktRoute,
   OMnieRoute: OMnieRoute,
+  PolitykaPrywatnosciRoute: PolitykaPrywatnosciRoute,
   SitemapDotxmlRoute: SitemapDotxmlRoute,
   WarsztatyRoute: WarsztatyRoute,
   ZielnikRoute: ZielnikRouteWithChildren,

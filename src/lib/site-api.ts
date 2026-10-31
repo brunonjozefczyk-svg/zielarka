@@ -386,6 +386,53 @@ export const cronBackup = async (authorization: string) => {
   return { ok: true as const, status: 200, at: saved.at };
 };
 
+const STAT_SECTIONS = new Set(["overview", "organic", "pages", "sources", "seo", "conversions", "page"]);
+const STAT_RANGES = new Set(["today", "7", "30", "90", "custom"]);
+const STAT_DEVICES = new Set(["", "desktop", "mobile", "tablet"]);
+
+export const statsReportFn = createServerFn({ method: "POST" })
+  .validator((data: {
+    password?: string;
+    statsToken?: string;
+    section?: string;
+    range?: string;
+    start?: string;
+    end?: string;
+    page?: string;
+    device?: string;
+    country?: string;
+  }) => ({
+    password: typeof data.password === "string" ? data.password.slice(0, 1024) : "",
+    statsToken: typeof data.statsToken === "string" ? data.statsToken.slice(0, 200) : "",
+    section: STAT_SECTIONS.has(data.section ?? "") ? (data.section as "overview") : "overview",
+    range: STAT_RANGES.has(data.range ?? "") ? (data.range as "30") : "30",
+    start: (data.start ?? "").slice(0, 10),
+    end: (data.end ?? "").slice(0, 10),
+    page: (data.page ?? "").trim().slice(0, 180),
+    device: STAT_DEVICES.has(data.device ?? "") ? (data.device ?? "") : "",
+    country: (data.country ?? "").trim().toLowerCase().slice(0, 8),
+  }))
+  .handler(async ({ data }) => {
+    const { authorizeStats, statsSessionKey } = await import("./stats-session.server");
+    const { editorClientKey } = await import("./client-key.server");
+    const result = await authorizeStats(data.password, data.statsToken, editorClientKey(), {
+      secret: statsSessionKey(process.env.STATS_SESSION_SECRET, process.env.EDITOR_PASSWORD ?? ""),
+      gate,
+    });
+    if (!result.ok) return { ok: false as const, report: null, message: result.message, statsToken: "" };
+    const { loadStats } = await import("./analytics.server");
+    const report = await loadStats({
+      section: data.section,
+      range: data.range,
+      start: data.start,
+      end: data.end,
+      page: data.page,
+      device: data.device,
+      country: data.country,
+    });
+    return { ok: true as const, report, message: "", statsToken: result.token };
+  });
+
 export { empty };
 
 const CONTACT_TOPICS = new Set(["konsultacja", "warsztat", "spacer", "klub", "inne"]);
@@ -442,7 +489,9 @@ export const sendContactFn = createServerFn({ method: "POST" })
       const message = raw.includes("Activation")
         ? "Otwórz skrzynkę kontakt@zielarka.pl i kliknij link „Activate Form”. Potem wyślij wiadomość jeszcze raz."
         : raw || "Nie udało się wysłać.";
-      return { ok: false as const, message };
+      return { ok: false as const, message, receipt: "" };
     }
-    return { ok: true as const };
+    const { issueFormReceipt } = await import("./analytics.server");
+    const receipt = issueFormReceipt(process.env.CMS_SEAL_KEY?.trim() || "");
+    return { ok: true as const, receipt };
   });

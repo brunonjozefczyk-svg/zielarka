@@ -4,6 +4,8 @@
 
 Codex przygotowuje zmianę na osobnej gałęzi i otwiera pull request do `main`. W opisie podaje cel, zmienione pliki, wykonane sprawdzenia, wyniki oraz ograniczenia. Na obecnym etapie zakres obejmuje stronę i SEO, w tym dostępność i szybkość. Formularze, zapisy i obsługa klientów wymagają osobnego zlecenia Brunona.
 
+Zielnik (`/zielnik` i karty roślin) pozostaje online w obecnej wersji. Codex, Roman i Melodia pomijają go w bieżących pracach, zaleceniach, szczegółowych audytach i alertach. Ewentualne usunięcie Zielnika wymaga osobnego polecenia Brunona.
+
 Repozytorium jest publiczne. Codex i Melodia podają w opisach, komentarzach i plikach wyłącznie informacje przeznaczone do publikacji. Prywatne dane właściciela i klientów oraz pomiary Google Search Console i GA4 przeznaczone są do prywatnego raportu dla Brunona. Dane dostępowe pozostają w odpowiednim magazynie sekretów.
 
 Przed pierwszym wypchnięciem nowej gałęzi Codex sprawdza reguły wdrożeń dla jej nazwy w `vercel.json` i, gdy ma powstać podgląd, efektywną konfigurację Vercela. Wybiera gałąź z wyłączonym automatycznym wdrażaniem albo potwierdza, że podgląd i jego build są odizolowane od produkcji, w tym od bazy, magazynów i migracji produkcyjnych.
@@ -12,13 +14,21 @@ Przed pierwszym wypchnięciem nowej gałęzi Codex sprawdza reguły wdrożeń dl
 * Przy zmianie kodu uruchamia `npm run typecheck`, `npm run lint`, `npm test`, `npm run check:auth` i `npx vite build` (kompilacja samej aplikacji). Dla zmian interfejsu sprawdza zmieniony przebieg również na telefonie lub w emulacji mobilnej i podaje, której metody użył.
 * Pełne `npm run build` uruchamia też `npm run db:migrate`. Codex wykonuje je wyłącznie w odizolowanym środowisku testowym lub w ramach zatwierdzonego wdrożenia. W PR wskazuje, które sprawdzenia faktycznie wykonał.
 
+## Współpraca przy stronie i SEO
+
+Brunon udzielił stałej zgody na konsultacje Codex, Romana i Melodii w całym bieżącym zakresie strony i SEO. Każde z nich może rozpocząć konsultację z własnej inicjatywy. Roman i Melodia mogą zgłosić pytanie w swoim prywatnym czacie. Codex pośredniczy w wymianie ogólnych metod, zanonimizowanych pytań technicznych, sposobów i wyników testów, wniosków oraz rozbieżnych ocen. Taka wymiana nie wymaga kolejnej zgody Brunona.
+
+Codex sprawdza, czy pytanie zostało już rozstrzygnięte, a odpowiedź i wynik przekazuje osobie lub botowi, który je zgłosił. Zamyka wątek po wyjaśnieniu sprawy i wraca do niej dopiero po pojawieniu się nowych danych. Przy zwykłych zmianach konsultacja jest dobrowolna. Codex wdraża poprawki w kodzie, a jedyny techniczny werdykt dla pełnego SHA Zielarki wydaje Melodia. Roman odpowiada za BruClean i doradza w sprawach ogólnych. Praca w repozytorium Zielarki i na jej danych pozostaje poza rolą Romana.
+
+Każda firma zachowuje u siebie prywatne dane klientów, pomiary Google Search Console i GA4 oraz dostęp do swoich kont. Codex przekazuje między projektami wyłącznie zanonimizowane informacje i nie nadaje uprawnień do kont. Decyzję o publikacji podejmuje Brunon zgodnie z zasadami poniżej.
+
 ## Niezależna recenzja Melodii
 
 Po przygotowaniu zmiany Codex oznacza PR jako gotowy do recenzji. Melodia jest audytorką Zielarka.pl w Groku. Jej rutyna ma co godzinę sprawdzać otwarte PR gotowe do recenzji i pomijać wersje robocze (draft). W zleceniu Codex podaje URL PR i stałe porównanie `https://github.com/brunonjozefczyk-svg/zielarka/compare/BASE_SHA...HEAD_SHA`, podstawiając pełne SHA obu rewizji.
 
 > Melodio, sprawdź PR [URL], od bazy [pełny SHA] do [pełny SHA bieżącego HEAD]. Różnice [URL]. Cel i pliki [zakres]. Codex sprawdził [wyniki i ograniczenia]. Zweryfikuj zmianę samodzielnie i zapisz wynik w tym PR.
 
-Uprawnienia Melodii w tej procedurze obejmują odczyt kodu i dowodów oraz dodanie komentarza w PR. Formalne zatwierdzanie recenzji, zamykanie i scalanie PR, push, wdrożenia, zmiany treści strony lub ustawień kont i wysyłanie formularzy są poza jej rolą. Werdykt ZAAKCEPTOWANE jest oceną techniczną.
+W repozytorium Zielarki uprawnienia Melodii obejmują odczyt kodu i dowodów oraz dodanie komentarza w PR. Formalne zatwierdzanie recenzji, zamykanie i scalanie PR, push, wdrożenia, zmiany treści strony lub ustawień kont i wysyłanie formularzy są poza jej rolą. Werdykt ZAAKCEPTOWANE jest oceną techniczną.
 
 Melodia dodaje jeden komentarz do PR dla sprawdzonej rewizji. Zastępuje pola w nawiasach i wybiera jeden z dwóch werdyktów:
 

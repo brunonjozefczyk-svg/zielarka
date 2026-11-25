@@ -8,16 +8,16 @@ Codex przygotowuje zmianę na osobnej gałęzi i otwiera pull request do `main`.
 * Przy zmianie kodu uruchamia `npm run typecheck`, `npm run lint`, `npm test`, `npm run check:auth` i `npx vite build` (kompilacja samej aplikacji). Dla zmian interfejsu sprawdza zmieniony przebieg również na telefonie lub w emulacji mobilnej i podaje, której metody użył.
 * Pełne `npm run build` uruchamia też `npm run db:migrate`. Codex wykonuje je wyłącznie w odizolowanym środowisku testowym lub w ramach zatwierdzonego wdrożenia. W PR wskazuje, które sprawdzenia faktycznie wykonał.
 
-## Recenzja Groka (Romana)
+## Niezależna recenzja Melodii
 
-Po przygotowaniu zmiany Codex oznacza PR jako gotowy do recenzji. Godzinna rutyna Romana pomija wersje robocze (draft). W zleceniu Codex podaje URL PR i stałe porównanie `https://github.com/brunonjozefczyk-svg/zielarka/compare/BASE_SHA...HEAD_SHA`, podstawiając pełne SHA obu rewizji.
+Po przygotowaniu zmiany Codex oznacza PR jako gotowy do recenzji. Melodia jest audytorką Zielarka.pl w Groku. Jej rutyna ma co godzinę sprawdzać otwarte PR gotowe do recenzji i pomijać wersje robocze (draft). W zleceniu Codex podaje URL PR i stałe porównanie `https://github.com/brunonjozefczyk-svg/zielarka/compare/BASE_SHA...HEAD_SHA`, podstawiając pełne SHA obu rewizji.
 
-> Romanie, sprawdź PR [URL], od bazy [pełny SHA] do [pełny SHA bieżącego HEAD]. Różnice [URL]. Cel i pliki [zakres]. Codex sprawdził [wyniki i ograniczenia]. Zweryfikuj zmianę samodzielnie i zapisz wynik w tym PR.
+> Melodio, sprawdź PR [URL], od bazy [pełny SHA] do [pełny SHA bieżącego HEAD]. Różnice [URL]. Cel i pliki [zakres]. Codex sprawdził [wyniki i ograniczenia]. Zweryfikuj zmianę samodzielnie i zapisz wynik w tym PR.
 
-Roman dodaje jeden komentarz do PR dla sprawdzonej rewizji. Zastępuje pola w nawiasach i wybiera jeden z dwóch werdyktów:
+Melodia dodaje jeden komentarz do PR dla sprawdzonej rewizji. Zastępuje pola w nawiasach i wybiera jeden z dwóch werdyktów:
 
 ```text
-Audyt Romana (Grok Bot) – SHA [pełny SHA sprawdzonego HEAD]
+Audyt Melodii (Grok Bot) – SHA [pełny SHA sprawdzonego HEAD]
 Werdykt: [ZAAKCEPTOWANE albo DO POPRAWY]
 Ustalenia: [ważność, plik, linia, problem i proponowana poprawka albo „brak uwag”]
 Sprawdzenia i ograniczenia: [co sprawdzono, z jakim wynikiem, czego nie potwierdzono]
@@ -27,7 +27,7 @@ Każdy nowy commit unieważnia poprzedni werdykt dla aktualnej wersji PR. Po pop
 
 ## Publikacja i cofnięcie zmiany
 
-Roman ocenia kod. Publiczne wdrożenie zatwierdza osobno Brunon (Bruno) w zaufanym czacie, wskazując pełny SHA ocenionej rewizji. Scalenie do `main` może uruchomić produkcyjne wdrożenie Vercela także po zmianie dokumentacji. Codex czeka z takim scaleniem na tę zgodę. Szczegóły reguły pomijania wdrożeń (Ignored Build Step) są w ustawieniach Vercela.
+Melodia ocenia kod. Publiczne wdrożenie zatwierdza osobno Brunon (Bruno) w zaufanym czacie, wskazując pełny SHA ocenionej rewizji. Scalenie do `main` może uruchomić produkcyjne wdrożenie Vercela także po zmianie dokumentacji. Codex czeka z takim scaleniem na tę zgodę. Szczegóły reguły pomijania wdrożeń (Ignored Build Step) są w ustawieniach Vercela.
 
 Przed publikacją Codex ustala, które wdrożenie rzeczywiście obsługuje `zielarka.pl`, zapisuje jego identyfikator i porównuje zakres zmian, w tym używaną na produkcji faviconę. Sam stan `main` nie potwierdza wersji domeny ani wyglądu ikony.
 

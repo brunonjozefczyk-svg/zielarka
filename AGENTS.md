@@ -2,7 +2,11 @@
 
 ## Przygotowanie zmiany
 
-Codex przygotowuje zmianę na osobnej gałęzi i otwiera pull request do `main`. W opisie podaje cel, zmienione pliki, wykonane sprawdzenia, wyniki oraz ograniczenia. W publicznym PR pomija dane prywatne i dostępowe.
+Codex przygotowuje zmianę na osobnej gałęzi i otwiera pull request do `main`. W opisie podaje cel, zmienione pliki, wykonane sprawdzenia, wyniki oraz ograniczenia. Na obecnym etapie zakres obejmuje stronę i SEO, w tym dostępność i szybkość. Formularze, zapisy i obsługa klientów wymagają osobnego zlecenia Brunona.
+
+Repozytorium jest publiczne. Codex i Melodia podają w opisach, komentarzach i plikach wyłącznie informacje przeznaczone do publikacji. Prywatne dane właściciela i klientów oraz pomiary Google Search Console i GA4 przeznaczone są do prywatnego raportu dla Brunona. Dane dostępowe pozostają w odpowiednim magazynie sekretów.
+
+Przed pierwszym wypchnięciem nowej gałęzi Codex sprawdza reguły wdrożeń dla jej nazwy w `vercel.json` i, gdy ma powstać podgląd, efektywną konfigurację Vercela. Wybiera gałąź z wyłączonym automatycznym wdrażaniem albo potwierdza, że podgląd i jego build są odizolowane od produkcji, w tym od bazy, magazynów i migracji produkcyjnych.
 
 * Przy samej dokumentacji sprawdza treść, odnośniki i `git diff --check`.
 * Przy zmianie kodu uruchamia `npm run typecheck`, `npm run lint`, `npm test`, `npm run check:auth` i `npx vite build` (kompilacja samej aplikacji). Dla zmian interfejsu sprawdza zmieniony przebieg również na telefonie lub w emulacji mobilnej i podaje, której metody użył.
@@ -14,16 +18,21 @@ Po przygotowaniu zmiany Codex oznacza PR jako gotowy do recenzji. Melodia jest a
 
 > Melodio, sprawdź PR [URL], od bazy [pełny SHA] do [pełny SHA bieżącego HEAD]. Różnice [URL]. Cel i pliki [zakres]. Codex sprawdził [wyniki i ograniczenia]. Zweryfikuj zmianę samodzielnie i zapisz wynik w tym PR.
 
+Uprawnienia Melodii w tej procedurze obejmują odczyt kodu i dowodów oraz dodanie komentarza w PR. Formalne zatwierdzanie recenzji, zamykanie i scalanie PR, push, wdrożenia, zmiany treści strony lub ustawień kont i wysyłanie formularzy są poza jej rolą. Werdykt ZAAKCEPTOWANE jest oceną techniczną.
+
 Melodia dodaje jeden komentarz do PR dla sprawdzonej rewizji. Zastępuje pola w nawiasach i wybiera jeden z dwóch werdyktów:
 
 ```text
 Audyt Melodii (Grok Bot) – SHA [pełny SHA sprawdzonego HEAD]
+Baza: [pełny SHA rewizji bazowej]
 Werdykt: [ZAAKCEPTOWANE albo DO POPRAWY]
 Ustalenia: [ważność, plik, linia, problem i proponowana poprawka albo „brak uwag”]
 Sprawdzenia i ograniczenia: [co sprawdzono, z jakim wynikiem, czego nie potwierdzono]
 ```
 
 Każdy nowy commit unieważnia poprzedni werdykt dla aktualnej wersji PR. Po poprawkach Codex podaje nowy pełny SHA, aktualną bazę i link do różnic, po czym ponawia zlecenie. Do decyzji o wdrożeniu przedstawia werdykt dla bieżącego HEAD wraz z linkiem do komentarza.
+
+Historyczna [instrukcja przeglądu PR #2](https://github.com/brunonjozefczyk-svg/zielarka/blob/a076daa31e2e4ba7cdb0398d1915a21c19646021/docs/grok-review.md) opisuje tamten jednorazowy audyt. Nowe PR podlegają procedurze opisanej tutaj.
 
 ## Publikacja i cofnięcie zmiany
 

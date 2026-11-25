@@ -2,9 +2,9 @@
 
 ## Przygotowanie zmiany
 
-Codex przygotowuje zmianę na osobnej gałęzi i otwiera pull request do `main`. W opisie podaje cel, zmienione pliki, wykonane sprawdzenia, wyniki oraz ograniczenia. Na obecnym etapie zakres obejmuje stronę i SEO, w tym dostępność i szybkość. Formularze, zapisy i obsługa klientów wymagają osobnego zlecenia Brunona.
+Codex przygotowuje zmianę na osobnej gałęzi i otwiera pull request do `main`. W opisie podaje cel, zmienione pliki, wykonane sprawdzenia, wyniki oraz ograniczenia. Na obecnym etapie zakres obejmuje stronę i SEO, w tym dostępność i szybkość. Warsztaty, formularze, zapisy i obsługa klientów wymagają osobnego zlecenia Brunona.
 
-Zielnik (`/zielnik` i karty roślin) pozostaje online w obecnej wersji. Codex, Roman i Melodia pomijają go w bieżących pracach, zaleceniach, szczegółowych audytach i alertach. Ewentualne usunięcie Zielnika wymaga osobnego polecenia Brunona.
+Zielnik (`/zielnik` i karty roślin) pozostaje online w obecnej wersji. Codex, Roman i Melodia pomijają go w pracach, zaleceniach, celach indeksacji, szczegółowych pomiarach, audytach i alertach. Przy zmianach innych stron zachowują jego treść, linki, wpisy w mapie witryny i ustawienia indeksowania. Zbiorcze dane całej domeny mogą go obejmować. Ewentualne usunięcie Zielnika wymaga osobnego polecenia Brunona.
 
 Repozytorium jest publiczne. Codex i Melodia podają w opisach, komentarzach i plikach wyłącznie informacje przeznaczone do publikacji. Prywatne dane właściciela i klientów oraz pomiary Google Search Console i GA4 przeznaczone są do prywatnego raportu dla Brunona. Dane dostępowe pozostają w odpowiednim magazynie sekretów.
 
@@ -16,11 +16,11 @@ Przed pierwszym wypchnięciem nowej gałęzi Codex sprawdza reguły wdrożeń dl
 
 ## Współpraca przy stronie i SEO
 
-Brunon udzielił stałej zgody na konsultacje Codex, Romana i Melodii w całym bieżącym zakresie strony i SEO. Każde z nich może rozpocząć konsultację z własnej inicjatywy. Roman i Melodia mogą zgłosić pytanie w swoim prywatnym czacie. Codex pośredniczy w wymianie ogólnych metod, zanonimizowanych pytań technicznych, sposobów i wyników testów, wniosków oraz rozbieżnych ocen. Taka wymiana nie wymaga kolejnej zgody Brunona.
+Brunon udzielił stałej zgody na współpracę Codex, Romana i Melodii w całym bieżącym zakresie strony i SEO. Każde z nich może rozpocząć konsultację z własnej inicjatywy. W głównej prywatnej rozmowie danego bota zgłoszenie „Do zespołu” zawiera jedno konkretne, zanonimizowane pytanie lub wniosek. Codex przekazuje je do właściwej prywatnej rozmowy i pośredniczy w wymianie ogólnych metod, zanonimizowanych pytań technicznych, sposobów i wyników testów, wniosków oraz rozbieżnych ocen. Taka wymiana nie wymaga kolejnej zgody Brunona.
 
-Codex sprawdza, czy pytanie zostało już rozstrzygnięte, a odpowiedź i wynik przekazuje osobie lub botowi, który je zgłosił. Zamyka wątek po wyjaśnieniu sprawy i wraca do niej dopiero po pojawieniu się nowych danych. Przy zwykłych zmianach konsultacja jest dobrowolna. Codex wdraża poprawki w kodzie, a jedyny techniczny werdykt dla pełnego SHA Zielarki wydaje Melodia. Roman odpowiada za BruClean i doradza w sprawach ogólnych. Praca w repozytorium Zielarki i na jej danych pozostaje poza rolą Romana.
+Codex sprawdza, czy pytanie zostało już rozstrzygnięte, a odpowiedź i wynik przekazuje zgłaszającemu w rozmowie, z której pochodziło zgłoszenie. Zamyka wątek po wyjaśnieniu sprawy i wraca do niej dopiero po pojawieniu się nowych danych. Przy zwykłych zmianach konsultacja jest dobrowolna i nie ma obowiązkowej drugiej recenzji. Codex przygotowuje poprawki na osobnej gałęzi, a jedyny techniczny werdykt dla pełnego SHA Zielarki wydaje Melodia. Roman odpowiada za BruClean i doradza w sprawach ogólnych. Praca w repozytorium Zielarki i na jej danych pozostaje poza rolą Romana. W ramach zadań zleconych w projekcie BruClean Melodia może też wykonywać prace pomocnicze, np. sprawdzić publiczną witrynę lub przygotować materiał roboczy dla Romana.
 
-Każda firma zachowuje u siebie prywatne dane klientów, pomiary Google Search Console i GA4 oraz dostęp do swoich kont. Codex przekazuje między projektami wyłącznie zanonimizowane informacje i nie nadaje uprawnień do kont. Decyzję o publikacji podejmuje Brunon zgodnie z zasadami poniżej.
+Każda firma zachowuje u siebie prywatne dane właściciela i klientów, pomiary Google Search Console i GA4, dane dostępowe (w tym tokeny) oraz uprawnienia do kont. Codex przekazuje między projektami wyłącznie zanonimizowane informacje i nie nadaje uprawnień do kont. Decyzję o publikacji podejmuje Brunon zgodnie z zasadami poniżej.
 
 ## Niezależna recenzja Melodii
 
@@ -30,7 +30,9 @@ Po przygotowaniu zmiany Codex oznacza PR jako gotowy do recenzji. Melodia jest a
 
 W repozytorium Zielarki uprawnienia Melodii obejmują odczyt kodu i dowodów oraz dodanie komentarza w PR. Formalne zatwierdzanie recenzji, zamykanie i scalanie PR, push, wdrożenia, zmiany treści strony lub ustawień kont i wysyłanie formularzy są poza jej rolą. Werdykt ZAAKCEPTOWANE jest oceną techniczną.
 
-Melodia dodaje jeden komentarz do PR dla sprawdzonej rewizji. Zastępuje pola w nawiasach i wybiera jeden z dwóch werdyktów:
+Melodia zapisuje jeden werdykt na pełny SHA. Tuż przed publikacją sprawdza komentarze PR. Istniejący werdykt dla tego SHA przywołuje w odpowiedzi zlecającemu, a uzasadnione sprostowanie wprowadza w swoim komentarzu. Dwa sprzeczne werdykty oznaczają nierozstrzygniętą ocenę. Codex przekazuje rozbieżności jednej instancji Melodii do uzgodnienia wyniku albo przedstawia do niezależnej recenzji nowy SHA po poprawkach.
+
+W komentarzu Melodia zastępuje pola w nawiasach i wybiera jeden z dwóch werdyktów:
 
 ```text
 Audyt Melodii (Grok Bot) – SHA [pełny SHA sprawdzonego HEAD]
